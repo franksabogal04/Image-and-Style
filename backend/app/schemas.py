@@ -55,6 +55,7 @@ class AppointmentCreate(BaseModel):
     start_time: datetime
     end_time: datetime
     notes: Optional[str] = None
+    price: Optional[float] = None  # NEW
 
 class AppointmentOut(BaseModel):
     id: int
@@ -64,5 +65,6 @@ class AppointmentOut(BaseModel):
     start_time: datetime
     end_time: datetime
     notes: Optional[str] = None
+    price: Optional[float] = None   
     class Config:
         from_attributes = True

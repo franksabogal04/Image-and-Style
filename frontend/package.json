@@ -10,10 +10,13 @@
     "web": "expo start --web"
   },
   "dependencies": {
+    "@react-native-picker/picker": "2.11.1",
     "expo": "^53.0.22",
     "expo-secure-store": "~14.2.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-native": "^0.79.5"
+    "react-native": "^0.79.5",
+    "react-native-calendars": "^1.1313.0",
+    "expo-status-bar": "~2.2.3"
   }
 }

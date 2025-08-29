@@ -1,5 +1,5 @@
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 from datetime import datetime
 from typing import List, Optional
@@ -38,3 +38,20 @@ def list_appointments(
     if end:
         q = q.filter(models.Appointment.end_time <= end)
     return q.order_by(models.Appointment.start_time.asc()).all()
+
+@router.delete("/{appointment_id}", status_code=204)
+def delete_appointment(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    # touch current_user to satisfy linters (auth still enforced by dependency)
+    _ = current_user  
+
+    obj = db.query(models.Appointment).filter(models.Appointment.id == appointment_id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+
+    db.delete(obj)
+    db.commit()
+    return Response(status_code=204)
