@@ -6,7 +6,7 @@ import { Picker } from '@react-native-picker/picker';
 import {
   View, Text, Button, TouchableOpacity, Alert,
   FlatList, Platform, SafeAreaView, TextInput,
-  KeyboardAvoidingView, TouchableWithoutFeedback, Keyboard
+  KeyboardAvoidingView, TouchableWithoutFeedback, Keyboard, ScrollView
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 
@@ -66,14 +66,22 @@ function addMinutesLocal(dateTimeLocalStr, minutes) {
 export default function AppointmentsScreen({ token, onLogout }) {
   const [appointments, setAppointments] = useState([]);
 
-  // real IDs (loaded from API)
-  const [clientId, setClientId] = useState(null);
+  // staff + clients
   const [staffId, setStaffId] = useState(null);
+  const [clients, setClients] = useState([]);
+  const [clientId, setClientId] = useState(null);
+
+  // add-client mini form
+  const [showAddClient, setShowAddClient] = useState(false);
+  const [firstName, setFirstName] = useState("");
+  const [lastName,  setLastName]  = useState("");
+  const [phone,     setPhone]     = useState("");
+  const [email,     setEmail]     = useState("");
 
   const [specialty, setSpecialty] = useState('Hair Stylist');
   const services = useMemo(() => SERVICE_CATALOG[specialty] ?? [], [specialty]);
 
-  // Initialize the selected service with the first of the specialty (kept stable)
+  // selected service (defaults to first of specialty)
   const [service, setService] = useState(services[0]?.name ?? 'Haircut');
 
   // duration & price (with "hours"); user edits should stick
@@ -89,7 +97,7 @@ export default function AppointmentsScreen({ token, onLogout }) {
 
   const authHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
-  const load = async () => {
+  const loadAppointments = async () => {
     try {
       const res = await fetch(`${API_BASE_URL}/appointments/`, { headers: authHeaders });
       if (!res.ok) throw new Error(`List failed: ${res.status} ${await res.text()}`);
@@ -99,7 +107,6 @@ export default function AppointmentsScreen({ token, onLogout }) {
     }
   };
 
-  // load me → staff id
   const loadMe = async () => {
     const res = await fetch(`${API_BASE_URL}/auth/me`, { headers: authHeaders });
     if (!res.ok) throw new Error(`me failed: ${res.status}`);
@@ -107,45 +114,62 @@ export default function AppointmentsScreen({ token, onLogout }) {
     setStaffId(me.id);
   };
 
-  // ensure a client exists (use first, else create "Walk In")
-  const ensureClient = async () => {
+  const loadClients = async () => {
     const r = await fetch(`${API_BASE_URL}/clients/`, { headers: authHeaders });
     if (!r.ok) throw new Error(`list clients failed: ${r.status}`);
     const list = await r.json();
-    if (Array.isArray(list) && list.length > 0) {
+    setClients(Array.isArray(list) ? list : []);
+    if (!clientId && Array.isArray(list) && list.length > 0) {
       setClientId(list[0].id);
-      return;
     }
-    const c = await fetch(`${API_BASE_URL}/clients/`, {
-      method: 'POST',
-      headers: authHeaders,
-      body: JSON.stringify({ first_name: "Walk", last_name: "In", phone: null, email: null })
-    });
-    if (!c.ok) throw new Error(`create client failed: ${c.status} ${await c.text()}`);
-    const cli = await c.json();
-    setClientId(cli.id);
   };
 
   useEffect(() => {
     (async () => {
       try {
         await loadMe();
-        await ensureClient();
-        await load();
+        await loadClients();
+        await loadAppointments();
       } catch (e) {
         Alert.alert('Init error', String(e.message || e));
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ⬇️ IMPORTANT: We removed the useEffects that auto-reset duration/price.
-  // Instead, we reset only when the user changes Specialty or Service via the pickers.
+  const createClient = async () => {
+    try {
+      if (!firstName.trim() || !lastName.trim()) {
+        return Alert.alert('Missing info', 'First and last name are required.');
+      }
+      const body = JSON.stringify({
+        first_name: firstName.trim(),
+        last_name:  lastName.trim(),
+        phone:      phone.trim() || null,
+        email:      email.trim() || null,
+      });
+      const res = await fetch(`${API_BASE_URL}/clients/`, {
+        method: 'POST',
+        headers: authHeaders,
+        body
+      });
+      if (!res.ok) throw new Error(`Create client failed: ${res.status} ${await res.text()}`);
+      const cli = await res.json();
+      // refresh list and select the new client
+      await loadClients();
+      setClientId(cli.id);
+      setShowAddClient(false);
+      setFirstName(""); setLastName(""); setPhone(""); setEmail("");
+      Alert.alert('Client added', `${cli.first_name} ${cli.last_name} created.`);
+    } catch (e) {
+      Alert.alert('Error', e.message);
+    }
+  };
 
   const createAppointment = async () => {
     try {
-      if (!staffId || !clientId) {
-        return Alert.alert('Please wait', 'Loading staff/client…');
-      }
+      if (!staffId) return Alert.alert('Please wait', 'Loading staff…');
+      if (!clientId) return Alert.alert('Select client', 'Please pick or create a client.');
       if (!selectedTime) return Alert.alert('Select time', 'Please choose a time slot.');
 
       const totalMins = Math.max(
@@ -172,7 +196,7 @@ export default function AppointmentsScreen({ token, onLogout }) {
       if (!res.ok) throw new Error(`Create failed: ${res.status} ${await res.text()}`);
 
       setSelectedTime(null);
-      await load();
+      await loadAppointments();
       Alert.alert('Success', `${service} booked on ${selectedDate} at ${selectedTime}`);
     } catch (e) {
       Alert.alert('Create failed', e.message);
@@ -189,7 +213,7 @@ export default function AppointmentsScreen({ token, onLogout }) {
         const t = await res.text();
         throw new Error(`Delete failed: ${res.status} ${t}`);
       }
-      await load();
+      await loadAppointments();
     } catch (e) {
       Alert.alert('Delete failed', e.message);
     }
@@ -212,18 +236,112 @@ export default function AppointmentsScreen({ token, onLogout }) {
     );
   };
 
+  const ClientPicker = (
+    <View>
+      <Text style={{ fontWeight: '600', marginTop: 12, color: '#fff' }}>Client</Text>
+      {clients.length > 0 ? (
+        <View style={{ borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, marginTop: 6, backgroundColor: '#14141a', minHeight: Platform.OS === 'ios' ? 180 : undefined }}>
+          <Picker
+            selectedValue={clientId}
+            onValueChange={(val) => setClientId(val)}
+            mode={Platform.OS === 'android' ? 'dropdown' : undefined}
+            dropdownIconColor="#f2f3f5"
+            style={{ color: '#f2f3f5', backgroundColor: '#14141a', height: Platform.OS === 'android' ? 48 : undefined }}
+            itemStyle={{ color: '#f2f3f5' }}
+          >
+            {clients.map(c => (
+              <Picker.Item
+                key={c.id}
+                label={`${c.first_name} ${c.last_name}${c.phone ? ` • ${c.phone}` : ''}`}
+                value={c.id}
+              />
+            ))}
+          </Picker>
+        </View>
+      ) : (
+        <Text style={{ color: '#a9adb6', marginTop: 6 }}>No clients yet. Add one below.</Text>
+      )}
+
+      <View style={{ marginTop: 8, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
+        <Button
+          title={showAddClient ? "Hide Add Client" : "Add Client"}
+          onPress={() => setShowAddClient(v => !v)}
+          color={Platform.OS === 'ios' ? undefined : '#6b7280'}
+        />
+      </View>
+
+      {showAddClient && (
+        <View style={{ marginTop: 10, backgroundColor: '#14141a', borderRadius: 10, borderWidth: 1, borderColor: '#2a2a33', padding: 12 }}>
+          <Text style={{ color: '#fff', fontWeight: '600', marginBottom: 8 }}>New Client</Text>
+
+          <Text style={{ color: '#fff', marginBottom: 6 }}>First name</Text>
+          <TextInput
+            value={firstName}
+            onChangeText={setFirstName}
+            placeholder="Jane"
+            placeholderTextColor="#7a7f88"
+            style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginBottom: 10 }}
+            returnKeyType="next"
+          />
+
+          <Text style={{ color: '#fff', marginBottom: 6 }}>Last name</Text>
+          <TextInput
+            value={lastName}
+            onChangeText={setLastName}
+            placeholder="Doe"
+            placeholderTextColor="#7a7f88"
+            style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginBottom: 10 }}
+            returnKeyType="next"
+          />
+
+          <Text style={{ color: '#fff', marginBottom: 6 }}>Phone</Text>
+          <TextInput
+            value={phone}
+            onChangeText={setPhone}
+            keyboardType="phone-pad"
+            placeholder="555-123-4567"
+            placeholderTextColor="#7a7f88"
+            style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginBottom: 10 }}
+            returnKeyType="next"
+          />
+
+          <Text style={{ color: '#fff', marginBottom: 6 }}>Email</Text>
+          <TextInput
+            value={email}
+            onChangeText={setEmail}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            placeholder="jane@example.com"
+            placeholderTextColor="#7a7f88"
+            style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginBottom: 12 }}
+            returnKeyType="done"
+            blurOnSubmit={true}
+            onSubmitEditing={() => Keyboard.dismiss()}
+          />
+
+          <View style={{ borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
+            <Button title="Create Client" onPress={createClient} color={Platform.OS === 'ios' ? undefined : '#3b82f6'} />
+          </View>
+        </View>
+      )}
+    </View>
+  );
+
   const Form = (
     <View style={{ padding: 16, paddingBottom: 8 }}>
       <Text style={{ fontSize: 22, fontWeight: '600', marginBottom: 8, color: '#fff' }}>New Appointment</Text>
       <Text style={{ color: '#aaa', marginBottom: 12 }}>API: {API_BASE_URL}</Text>
 
-      <Text style={{ fontWeight: '600', marginBottom: 6, color: '#fff' }}>Pick a date</Text>
+      {/* Client select / add */}
+      {ClientPicker}
+
+      <Text style={{ fontWeight: '600', marginTop: 12, color: '#fff' }}>Pick a date</Text>
       <Calendar
         onDayPress={(d) => setSelectedDate(d.dateString)}
         markedDates={{ [selectedDate]: { selected: true, selectedColor: '#3b82f6' } }}
         minDate={today}
         enableSwipeMonths
-        style={{ marginBottom: 12, backgroundColor: '#14141a', borderRadius: 8 }}
+        style={{ marginTop: 6, marginBottom: 12, backgroundColor: '#14141a', borderRadius: 8 }}
         theme={{
           backgroundColor: '#14141a',
           calendarBackground: '#14141a',
@@ -237,7 +355,7 @@ export default function AppointmentsScreen({ token, onLogout }) {
         }}
       />
 
-      <Text style={{ fontWeight: '600', marginTop: 6, color: '#fff' }}>Specialty</Text>
+      <Text style={{ fontWeight: '600', color: '#fff' }}>Specialty</Text>
       <View style={{ borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, marginTop: 6, backgroundColor: '#14141a', minHeight: Platform.OS === 'ios' ? 180 : undefined }}>
         <Picker
           selectedValue={specialty}
@@ -246,7 +364,7 @@ export default function AppointmentsScreen({ token, onLogout }) {
             const list = SERVICE_CATALOG[val] ?? [];
             const first = list[0];
             setService(first?.name ?? "");
-            // reset to defaults for the newly chosen specialty/service
+            // reset defaults for new service
             setHours("0");
             setMinutesOverride(String(first?.minutes ?? 30));
             setPrice(String(first?.price ?? 0));
@@ -268,7 +386,6 @@ export default function AppointmentsScreen({ token, onLogout }) {
           onValueChange={(val) => {
             setService(val);
             const meta = (SERVICE_CATALOG[specialty] ?? []).find(s => s.name === val);
-            // reset to defaults for the newly chosen service
             setHours("0");
             setMinutesOverride(String(meta?.minutes ?? 30));
             setPrice(String(meta?.price ?? 0));
@@ -336,7 +453,7 @@ export default function AppointmentsScreen({ token, onLogout }) {
 
       <Text style={{ fontSize: 18, fontWeight: '600', marginTop: 24, color: '#fff' }}>Appointments</Text>
       <View style={{ marginTop: 8, marginBottom: 8, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
-        <Button title="Refresh" onPress={load} color={Platform.OS === 'ios' ? undefined : '#3b82f6'} />
+        <Button title="Refresh" onPress={async () => { await loadClients(); await loadAppointments(); }} color={Platform.OS === 'ios' ? undefined : '#3b82f6'} />
       </View>
     </View>
   );
