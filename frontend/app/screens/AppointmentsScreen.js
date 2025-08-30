@@ -1,10 +1,12 @@
+// Frontend/app/screens/AppointmentsScreen.js
 import React, { useEffect, useMemo, useState } from 'react';
 import { API_BASE_URL } from '../config';
 import { Calendar } from 'react-native-calendars';
 import { Picker } from '@react-native-picker/picker';
 import {
   View, Text, Button, TouchableOpacity, Alert,
-  FlatList, Platform, SafeAreaView, TextInput
+  FlatList, Platform, SafeAreaView, TextInput,
+  KeyboardAvoidingView, TouchableWithoutFeedback, Keyboard
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 
@@ -40,11 +42,6 @@ const SERVICE_CATALOG = {
 };
 
 function pad(n) { return n.toString().padStart(2, '0'); }
-function addMinutes(isoLike, minutes) {
-  const d = new Date(isoLike);
-  const out = new Date(d.getTime() + minutes * 60000);
-  return out.toISOString().slice(0,19);
-}
 function generateSlots(openHour = OPEN_TIME, closeHour = CLOSE_TIME, step = SLOT_MINUTES) {
   const slots = [];
   for (let h = openHour; h < closeHour; h++) {
@@ -55,17 +52,33 @@ function generateSlots(openHour = OPEN_TIME, closeHour = CLOSE_TIME, step = SLOT
   return slots;
 }
 
+// Keep times in LOCAL time (no toISOString) to avoid end<=start issues
+function addMinutesLocal(dateTimeLocalStr, minutes) {
+  const [dateStr, timeStr] = dateTimeLocalStr.split('T');
+  const [Y, M, D] = dateStr.split('-').map(Number);
+  const [h, m, s] = timeStr.split(':').map(Number);
+  const base = new Date(Y, M - 1, D, h, m, s || 0);
+  const added = new Date(base.getTime() + minutes * 60000);
+  const p = (x) => String(x).padStart(2, '0');
+  return `${added.getFullYear()}-${p(added.getMonth() + 1)}-${p(added.getDate())}T${p(added.getHours())}:${p(added.getMinutes())}:${p(added.getSeconds())}`;
+}
+
 export default function AppointmentsScreen({ token, onLogout }) {
   const [appointments, setAppointments] = useState([]);
-  const [clientId] = useState('1');
-  const [staffId] = useState('2');
+
+  // real IDs (loaded from API)
+  const [clientId, setClientId] = useState(null);
+  const [staffId, setStaffId] = useState(null);
 
   const [specialty, setSpecialty] = useState('Hair Stylist');
   const services = useMemo(() => SERVICE_CATALOG[specialty] ?? [], [specialty]);
+
+  // Initialize the selected service with the first of the specialty (kept stable)
   const [service, setService] = useState(services[0]?.name ?? 'Haircut');
 
-  // new: override-able duration & price
+  // duration & price (with "hours"); user edits should stick
   const selectedServiceMeta = services.find(s => s.name === service) ?? { minutes: 30, price: 0 };
+  const [hours, setHours] = useState("0");
   const [minutesOverride, setMinutesOverride] = useState(String(selectedServiceMeta.minutes));
   const [price, setPrice] = useState(String(selectedServiceMeta.price ?? 0));
 
@@ -86,42 +99,73 @@ export default function AppointmentsScreen({ token, onLogout }) {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  // load me → staff id
+  const loadMe = async () => {
+    const res = await fetch(`${API_BASE_URL}/auth/me`, { headers: authHeaders });
+    if (!res.ok) throw new Error(`me failed: ${res.status}`);
+    const me = await res.json();
+    setStaffId(me.id);
+  };
 
-  // when specialty changes -> services list changes -> pick first
-  useEffect(() => {
-    if (services.length > 0) {
-      setService(services[0].name);
-      setMinutesOverride(String(services[0].minutes));
-      setPrice(String(services[0].price ?? 0));
+  // ensure a client exists (use first, else create "Walk In")
+  const ensureClient = async () => {
+    const r = await fetch(`${API_BASE_URL}/clients/`, { headers: authHeaders });
+    if (!r.ok) throw new Error(`list clients failed: ${r.status}`);
+    const list = await r.json();
+    if (Array.isArray(list) && list.length > 0) {
+      setClientId(list[0].id);
+      return;
     }
-  }, [services.length]);
+    const c = await fetch(`${API_BASE_URL}/clients/`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ first_name: "Walk", last_name: "In", phone: null, email: null })
+    });
+    if (!c.ok) throw new Error(`create client failed: ${c.status} ${await c.text()}`);
+    const cli = await c.json();
+    setClientId(cli.id);
+  };
 
-  // when service changes -> update defaults
   useEffect(() => {
-    setMinutesOverride(String(selectedServiceMeta.minutes));
-    setPrice(String(selectedServiceMeta.price ?? 0));
-  }, [service]);
+    (async () => {
+      try {
+        await loadMe();
+        await ensureClient();
+        await load();
+      } catch (e) {
+        Alert.alert('Init error', String(e.message || e));
+      }
+    })();
+  }, []);
+
+  // ⬇️ IMPORTANT: We removed the useEffects that auto-reset duration/price.
+  // Instead, we reset only when the user changes Specialty or Service via the pickers.
 
   const createAppointment = async () => {
     try {
+      if (!staffId || !clientId) {
+        return Alert.alert('Please wait', 'Loading staff/client…');
+      }
       if (!selectedTime) return Alert.alert('Select time', 'Please choose a time slot.');
 
-      const mins = Math.max(5, parseInt(minutesOverride || '0', 10)); // at least 5 min
-      const startISO = `${selectedDate}T${selectedTime}:00`;
-      const endISO = addMinutes(startISO, mins);
+      const totalMins = Math.max(
+        5,
+        (parseInt(hours || "0", 10) * 60) + parseInt(minutesOverride || "0", 10)
+      );
 
-      // Quick-win: store price & specialty in notes so we don't need DB migration yet
-      const notes = `${specialty}${price ? ` | $${Number(price).toFixed(2)}` : ''} | ${mins} min`;
+      const startISO = `${selectedDate}T${selectedTime}:00`;
+      const endISO = addMinutesLocal(startISO, totalMins);
+
+      const notes = `${specialty}${price ? ` | $${Number(price).toFixed(2)}` : ''} | ${totalMins} min`;
 
       const body = JSON.stringify({
-        client_id: parseInt(clientId, 10),
-        staff_id: parseInt(staffId, 10),
+        client_id: Number(clientId),
+        staff_id: Number(staffId),
         service_name: service,
         start_time: startISO,
         end_time: endISO,
         notes,
-        price: Number(price)           
+        price: Number(price)
       });
 
       const res = await fetch(`${API_BASE_URL}/appointments/`, { method: 'POST', headers: authHeaders, body });
@@ -137,7 +181,6 @@ export default function AppointmentsScreen({ token, onLogout }) {
 
   const deleteAppointment = async (id) => {
     try {
-      // Try the RESTful DELETE; if your backend doesn’t have it yet, see section B below
       const res = await fetch(`${API_BASE_URL}/appointments/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
@@ -198,7 +241,16 @@ export default function AppointmentsScreen({ token, onLogout }) {
       <View style={{ borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, marginTop: 6, backgroundColor: '#14141a', minHeight: Platform.OS === 'ios' ? 180 : undefined }}>
         <Picker
           selectedValue={specialty}
-          onValueChange={setSpecialty}
+          onValueChange={(val) => {
+            setSpecialty(val);
+            const list = SERVICE_CATALOG[val] ?? [];
+            const first = list[0];
+            setService(first?.name ?? "");
+            // reset to defaults for the newly chosen specialty/service
+            setHours("0");
+            setMinutesOverride(String(first?.minutes ?? 30));
+            setPrice(String(first?.price ?? 0));
+          }}
           mode={Platform.OS === 'android' ? 'dropdown' : undefined}
           dropdownIconColor="#f2f3f5"
           style={{ color: '#f2f3f5', backgroundColor: '#14141a', height: Platform.OS === 'android' ? 48 : undefined }}
@@ -213,7 +265,14 @@ export default function AppointmentsScreen({ token, onLogout }) {
       <View style={{ borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, marginTop: 6, backgroundColor: '#14141a', minHeight: Platform.OS === 'ios' ? 180 : undefined }}>
         <Picker
           selectedValue={service}
-          onValueChange={setService}
+          onValueChange={(val) => {
+            setService(val);
+            const meta = (SERVICE_CATALOG[specialty] ?? []).find(s => s.name === val);
+            // reset to defaults for the newly chosen service
+            setHours("0");
+            setMinutesOverride(String(meta?.minutes ?? 30));
+            setPrice(String(meta?.price ?? 0));
+          }}
           mode={Platform.OS === 'android' ? 'dropdown' : undefined}
           dropdownIconColor="#f2f3f5"
           style={{ color: '#f2f3f5', backgroundColor: '#14141a', height: Platform.OS === 'android' ? 48 : undefined }}
@@ -224,23 +283,43 @@ export default function AppointmentsScreen({ token, onLogout }) {
       </View>
       <Text style={{ color: '#a9adb6', marginTop: 4 }}>Selected: {service}</Text>
 
-      {/* NEW: Duration override */}
-      <Text style={{ fontWeight: '600', marginTop: 12, color: '#fff' }}>Duration (minutes)</Text>
+      {/* Hours */}
+      <Text style={{ fontWeight: '600', marginTop: 12, color: '#fff' }}>Hours</Text>
+      <TextInput
+        value={hours}
+        onChangeText={setHours}
+        keyboardType="number-pad"
+        returnKeyType="done"
+        blurOnSubmit={true}
+        onSubmitEditing={() => Keyboard.dismiss()}
+        placeholder="0"
+        placeholderTextColor="#7a7f88"
+        style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginTop: 6 }}
+      />
+
+      {/* Minutes */}
+      <Text style={{ fontWeight: '600', marginTop: 12, color: '#fff' }}>Minutes</Text>
       <TextInput
         value={minutesOverride}
         onChangeText={setMinutesOverride}
         keyboardType="number-pad"
+        returnKeyType="done"
+        blurOnSubmit={true}
+        onSubmitEditing={() => Keyboard.dismiss()}
         placeholder={`${selectedServiceMeta.minutes}`}
         placeholderTextColor="#7a7f88"
         style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginTop: 6 }}
       />
 
-      {/* NEW: Price */}
+      {/* Price */}
       <Text style={{ fontWeight: '600', marginTop: 12, color: '#fff' }}>Price ($)</Text>
       <TextInput
         value={price}
         onChangeText={setPrice}
         keyboardType="decimal-pad"
+        returnKeyType="done"
+        blurOnSubmit={true}
+        onSubmitEditing={() => Keyboard.dismiss()}
         placeholder={`${selectedServiceMeta.price ?? 0}`}
         placeholderTextColor="#7a7f88"
         style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginTop: 6 }}
@@ -263,39 +342,44 @@ export default function AppointmentsScreen({ token, onLogout }) {
   );
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: '#111827' }}>
-      <StatusBar style="light" backgroundColor="#111827" />
-      <FlatList
-        data={appointments}
-        keyExtractor={(item) => String(item.id)}
-        ListHeaderComponent={Form}
-        renderItem={({ item }) => (
-          <View style={{ backgroundColor: '#14141a', marginHorizontal: 16, marginVertical: 8, padding: 12, borderRadius: 10, borderWidth: 1, borderColor: '#2a2a33' }}>
-            <Text style={{ fontWeight: '600', color: '#fff' }}>{item.service_name}</Text>
-            <Text style={{ color: '#ccc' }}>{item.start_time} → {item.end_time}</Text>
-            <Text style={{ color: '#ccc' }}>Client #{item.client_id} • Staff #{item.staff_id}</Text>
-            {!!item.notes && <Text style={{ color: '#a9adb6', marginTop: 4 }}>{item.notes}</Text>}
+    <KeyboardAvoidingView style={{ flex: 1, backgroundColor: '#111827' }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+        <SafeAreaView style={{ flex: 1 }}>
+          <StatusBar style="light" backgroundColor="#111827" />
+          <FlatList
+            data={appointments}
+            keyExtractor={(item) => String(item.id)}
+            ListHeaderComponent={Form}
+            renderItem={({ item }) => (
+              <View style={{ backgroundColor: '#14141a', marginHorizontal: 16, marginVertical: 8, padding: 12, borderRadius: 10, borderWidth: 1, borderColor: '#2a2a33' }}>
+                <Text style={{ fontWeight: '600', color: '#fff' }}>{item.service_name}</Text>
+                <Text style={{ color: '#ccc' }}>{item.start_time} → {item.end_time}</Text>
+                <Text style={{ color: '#ccc' }}>Client #{item.client_id} • Staff #{item.staff_id}</Text>
+                {!!item.notes && <Text style={{ color: '#a9adb6', marginTop: 4 }}>{item.notes}</Text>}
 
-            <View style={{ marginTop: 8, flexDirection: 'row', gap: 12 }}>
-              <View style={{ flex: 1, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
-                <Button title="Delete" onPress={() => {
-                  Alert.alert('Delete appointment?', 'This cannot be undone.', [
-                    { text: 'Cancel', style: 'cancel' },
-                    { text: 'Delete', style: 'destructive', onPress: () => deleteAppointment(item.id) },
-                  ]);
-                }} color={Platform.OS === 'ios' ? undefined : '#e11d48'} />
+                <View style={{ marginTop: 8, flexDirection: 'row', gap: 12 }}>
+                  <View style={{ flex: 1, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
+                    <Button title="Delete" onPress={() => {
+                      Alert.alert('Delete appointment?', 'This cannot be undone.', [
+                        { text: 'Cancel', style: 'cancel' },
+                        { text: 'Delete', style: 'destructive', onPress: () => deleteAppointment(item.id) },
+                      ]);
+                    }} color={Platform.OS === 'ios' ? undefined : '#e11d48'} />
+                  </View>
+                </View>
               </View>
-            </View>
-          </View>
-        )}
-        ListFooterComponent={
-          <View style={{ padding: 16 }}>
-            <Button title="Logout" onPress={onLogout} color="#e11d48" />
-          </View>
-        }
-        contentContainerStyle={{ paddingBottom: 32 }}
-        keyboardShouldPersistTaps="handled"
-      />
-    </SafeAreaView>
+            )}
+            ListFooterComponent={
+              <View style={{ padding: 16 }}>
+                <Button title="Logout" onPress={onLogout} color="#e11d48" />
+              </View>
+            }
+            contentContainerStyle={{ paddingBottom: 32 }}
+            keyboardDismissMode="on-drag"
+            keyboardShouldPersistTaps="handled"
+          />
+        </SafeAreaView>
+      </TouchableWithoutFeedback>
+    </KeyboardAvoidingView>
   );
 }

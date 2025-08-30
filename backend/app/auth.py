@@ -36,7 +36,7 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered.")
     hashed = get_password_hash(user.password)
-    db_user = models.User(email=user.email, name=user.name, role=user.role, password_hash=hashed)
+    db_user = models.User(email=user.email, name=user.name, role=(user.role.value if hasattr(user.role, "value") else str(user.role)), hashed_password=hashed)
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
@@ -45,9 +45,10 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
 @router.post("/login", response_model=schemas.Token)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == form_data.username).first()
-    if not user or not verify_password(form_data.password, user.password_hash):
+    if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    token = create_access_token({"sub": str(user.id), "role": user.role.value})
+    role_str = user.role if isinstance(user.role, str) else getattr(user.role, "value", str(user.role))
+    token = create_access_token({"sub": str(user.id), "role": role_str})
     return {"access_token": token, "token_type": "bearer"}
 
 @router.get("/me", response_model=schemas.UserOut)
