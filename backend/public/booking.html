@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Book an Appointment</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:#0f1115; color:#e6e8ee; margin:0; }
+    .wrap { max-width: 900px; margin: 24px auto; padding: 16px; }
+    .card { background:#141824; border:1px solid #2a2f3b; border-radius:12px; padding:16px; margin-bottom:16px; }
+    h1,h3 { margin:0 0 8px 0; }
+    label { display:block; font-weight:600; margin-top:10px; }
+    select, input, textarea {
+      width:100%; margin-top:6px; padding:10px; background:#111827; color:#e6e8ee;
+      border:1px solid #2a2f3b; border-radius:8px; outline:none;
+    }
+    button {
+      display:block; width:100%; padding:12px 14px; border-radius:10px; border:1px solid #2a2f3b;
+      background:#2563eb; color:#fff; font-weight:700; margin-top:14px; cursor:pointer;
+    }
+    button[disabled] { opacity:.6; cursor:not-allowed; }
+    .muted { opacity:.8; font-size:12px; margin-top:6px; }
+    .success { background:#12351f; border:1px solid #1e6031; color:#a1f0c4; padding:10px; border-radius:8px; margin-top:10px; }
+    .error { background:#3a1217; border:1px solid #7f1d1d; color:#fecaca; padding:10px; border-radius:8px; margin-top:10px; }
+    .empty { padding:8px; opacity:.85; border:1px dashed #2a2f3b; border-radius:10px; }
+
+    /* Grids */
+    .grid { display:grid; gap:12px; }
+    .grid.staff { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+    .grid.services { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+    .grid.times { grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); }
+
+    /* Tiles / Buttons */
+    .tile {
+      background:#111827; border:1px solid #2a2f3b; border-radius:12px; padding:12px; cursor:pointer;
+      display:flex; flex-direction:column; align-items:center; text-align:center; min-height:160px;
+      transition:border-color .15s, box-shadow .15s;
+    }
+    .tile:hover { border-color:#3b82f6; }
+    .tile.selected { border-color:#3b82f6; box-shadow:0 0 0 2px rgba(59,130,246,.35) inset; }
+    .avatar { width:72px; height:72px; border-radius:50%; border:1px solid #2a2f3b; object-fit:cover; background:#0b0f1a; }
+    .initial {
+      width:72px; height:72px; border-radius:50%; border:1px solid #2a2f3b; background:#0b0f1a;
+      display:flex; align-items:center; justify-content:center; font-weight:800; color:#a8b3cf;
+    }
+    .tile .name { margin-top:8px; font-weight:600; }
+    .tile .sub { margin-top:2px; font-size:12px; opacity:.8; }
+    .svc { min-height:auto; align-items:flex-start; }
+    .svc .name { font-weight:600; }
+    .svc .meta { font-size:12px; opacity:.9; margin-top:6px; }
+    .svc .price { margin-top:8px; font-weight:700; }
+
+    .time-btn {
+      background:#111827; border:1px solid #2a2f3b; color:#e6e8ee; border-radius:10px; padding:10px;
+      cursor:pointer; width:100%; text-align:center; transition:border-color .15s, box-shadow .15s;
+    }
+    .time-btn:hover { border-color:#3b82f6; }
+    .time-btn.selected { border-color:#3b82f6; box-shadow:0 0 0 2px rgba(59,130,246,.35) inset; }
+
+    .row { display:flex; gap:12px; }
+    .row > div { flex:1; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Book an Appointment</h1>
+
+    <div class="card">
+      <!-- 1) Specialty -->
+      <label>Choose a specialty</label>
+      <select id="specialty">
+        <option value="">— Select a specialty —</option>
+      </select>
+      <div class="muted">Pick a specialty to see professionals and services.</div>
+    </div>
+
+    <!-- 2) Professionals (appear AFTER selecting specialty) -->
+    <div class="card">
+      <h3>Choose a professional</h3>
+      <div id="staffGrid" class="grid staff"></div>
+      <div id="staffEmpty" class="empty" style="display:none">No professionals for this specialty.</div>
+    </div>
+
+    <!-- 3) Services (filtered by specialty) -->
+    <div class="card">
+      <h3>Choose a service</h3>
+      <div id="serviceGrid" class="grid services"></div>
+      <div id="serviceEmpty" class="empty" style="display:none">No services for this specialty.</div>
+    </div>
+
+    <!-- 4) Date & Time -->
+    <div class="card">
+      <h3>Pick date and time</h3>
+      <div class="row">
+        <div>
+          <label>Date</label>
+          <input id="date" type="date" />
+        </div>
+      </div>
+
+      <label style="margin-top:12px">Available times</label>
+      <div id="timesGrid" class="grid times"></div>
+      <div id="timesEmpty" class="empty" style="display:none">Select specialty, professional, and service to see times.</div>
+
+      <div id="msg"></div>
+    </div>
+
+    <!-- 5) Client info + Book -->
+    <div class="card">
+      <h3>Your Info</h3>
+      <div class="row">
+        <div>
+          <label>First name</label>
+          <input id="first" type="text" placeholder="Jane" />
+        </div>
+        <div>
+          <label>Last name</label>
+          <input id="last" type="text" placeholder="Doe" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>Phone</label>
+          <input id="phone" type="tel" placeholder="555-123-4567" />
+        </div>
+        <div>
+          <label>Email</label>
+          <input id="email" type="email" placeholder="jane@example.com" />
+        </div>
+      </div>
+
+      <label>Notes (optional)</label>
+      <textarea id="notes" rows="3" placeholder="Anything we should know?"></textarea>
+
+      <button id="book" disabled>Book appointment</button>
+    </div>
+
+    <p style="opacity:.7;font-size:12px;text-align:center">Powered by Image-and-Style</p>
+  </div>
+
+<script>
+/** API base — set to your backend (LAN IP for phones) */
+const API_BASE = "http://localhost:8000";
+
+/** Elements */
+const el = (id) => document.getElementById(id);
+const specialtySel = el("specialty");
+const staffGrid    = el("staffGrid");
+const staffEmpty   = el("staffEmpty");
+const serviceGrid  = el("serviceGrid");
+const serviceEmpty = el("serviceEmpty");
+const dateInp      = el("date");
+const timesGrid    = el("timesGrid");
+const timesEmpty   = el("timesEmpty");
+const msg          = el("msg");
+const first        = el("first");
+const last         = el("last");
+const phone        = el("phone");
+const email        = el("email");
+const notes        = el("notes");
+const bookBtn      = el("book");
+
+/** Local state */
+let selectedSpecialty = "";
+let selectedStaffId = null;
+let selectedService = null; // { id, name, duration, price }
+let selectedTime = "";
+
+/** Helpers */
+function setMsg(text, ok) {
+  msg.innerHTML = "";
+  if (!text) return;
+  const d = document.createElement("div");
+  d.className = ok ? "success" : "error";
+  d.textContent = text;
+  msg.appendChild(d);
+}
+
+async function fetchJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function enableBookIfReady() {
+  const ready =
+    selectedSpecialty &&
+    selectedStaffId &&
+    selectedService &&
+    dateInp.value &&
+    selectedTime &&
+    first.value.trim() &&
+    last.value.trim();
+  bookBtn.disabled = !ready;
+}
+
+/** 1) Load specialties */
+async function loadSpecialties() {
+  specialtySel.innerHTML = '<option value="">— Select a specialty —</option>';
+  try {
+    const list = await fetchJson(`${API_BASE}/public/specialties`);
+    const opts = list.length ? list : [
+      { slug: "hair", label: "Hair" },
+      { slug: "nails", label: "Nails" },
+      { slug: "lash", label: "Lash" },
+      { slug: "brow", label: "Brow" },
+      { slug: "skincare", label: "Skincare" },
+      { slug: "pedicure", label: "Pedicure" },
+    ];
+    for (const s of opts) {
+      const o = document.createElement("option");
+      o.value = s.slug;
+      o.textContent = s.label || s.slug;
+      specialtySel.appendChild(o);
+    }
+  } catch {
+    // fallback already added above
+  }
+}
+
+/** 2) Load staff for specialty and render grid */
+async function loadStaffFor(spec) {
+  staffGrid.innerHTML = "";
+  staffEmpty.style.display = "none";
+  if (!spec) return;
+  const list = await fetchJson(`${API_BASE}/public/staff?category=${encodeURIComponent(spec)}`);
+  if (!list.length) { staffEmpty.style.display = "block"; return; }
+
+  for (const u of list) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "tile";
+    card.onclick = () => {
+      selectedStaffId = u.id;
+      [...staffGrid.children].forEach(ch => ch.classList.remove("selected"));
+      card.classList.add("selected");
+      selectedTime = "";
+      renderTimes([]); // clear
+      loadAvailability(); // try to load if service/date are set
+      enableBookIfReady();
+    };
+
+    if (u.avatar_url) {
+      const img = document.createElement("img");
+      img.className = "avatar";
+      img.src = u.avatar_url;
+      img.alt = u.name;
+      card.appendChild(img);
+    } else {
+      const init = document.createElement("div");
+      init.className = "initial";
+      init.textContent = (u.name || "?").charAt(0).toUpperCase();
+      card.appendChild(init);
+    }
+
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = u.name;
+    card.appendChild(name);
+
+    const sub = document.createElement("div");
+    sub.className = "sub";
+    sub.textContent = u.profession || "";
+    card.appendChild(sub);
+
+    staffGrid.appendChild(card);
+  }
+}
+
+/** 3) Load services for specialty and render grid */
+async function loadServicesFor(spec) {
+  serviceGrid.innerHTML = "";
+  serviceEmpty.style.display = "none";
+  if (!spec) return;
+  const list = await fetchJson(`${API_BASE}/public/services?category=${encodeURIComponent(spec)}`);
+  if (!list.length) { serviceEmpty.style.display = "block"; return; }
+
+  for (const s of list) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "tile svc";
+    card.onclick = () => {
+      selectedService = { id: s.id, name: s.name, duration: Number(s.duration_minutes||0), price: Number(s.price||0) };
+      [...serviceGrid.children].forEach(ch => ch.classList.remove("selected"));
+      card.classList.add("selected");
+      selectedTime = "";
+      renderTimes([]); // clear
+      loadAvailability();
+      enableBookIfReady();
+    };
+
+    const nm = document.createElement("div");
+    nm.className = "name";
+    nm.textContent = s.name;
+    card.appendChild(nm);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `Duration: ${s.duration_minutes} min`;
+    card.appendChild(meta);
+
+    const price = document.createElement("div");
+    price.className = "price";
+    price.textContent = `$${Number(s.price||0).toFixed(2)}`;
+    card.appendChild(price);
+
+    serviceGrid.appendChild(card);
+  }
+}
+
+/** 4) Availability & times */
+function renderTimes(list) {
+  timesGrid.innerHTML = "";
+  timesEmpty.style.display = list.length ? "none" : "block";
+  for (const t of list) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "time-btn";
+    btn.textContent = t;
+    btn.onclick = () => {
+      selectedTime = t;
+      [...timesGrid.children].forEach(ch => ch.classList.remove("selected"));
+      btn.classList.add("selected");
+      enableBookIfReady();
+    };
+    timesGrid.appendChild(btn);
+  }
+}
+
+async function loadAvailability() {
+  setMsg("", true);
+  timesEmpty.style.display = "block";
+  if (!selectedSpecialty || !selectedStaffId || !selectedService || !dateInp.value) {
+    renderTimes([]);
+    return;
+  }
+  try {
+    const url = `${API_BASE}/public/availability?staff_id=${encodeURIComponent(selectedStaffId)}&date=${encodeURIComponent(dateInp.value)}&service_id=${encodeURIComponent(selectedService.id)}`;
+    const data = await fetchJson(url);
+    const times = data.available || [];
+    renderTimes(times);
+    if (!times.length) setMsg("No times available for that day—try a different date.", false);
+  } catch (e) {
+    renderTimes([]);
+    setMsg(`Failed to load availability: ${e.message}`, false);
+  }
+}
+
+/** Book */
+bookBtn.addEventListener("click", async () => {
+  try {
+    setMsg("", true);
+    if (bookBtn.disabled) return;
+
+    const url = new URL(`${API_BASE}/public/appointments`);
+    url.searchParams.set("staff_id", String(selectedStaffId));
+    url.searchParams.set("service_id", String(selectedService.id));
+    url.searchParams.set("date", dateInp.value);
+    url.searchParams.set("time", selectedTime);
+    url.searchParams.set("client_first_name", first.value.trim());
+    url.searchParams.set("client_last_name", last.value.trim());
+    if (phone.value.trim()) url.searchParams.set("client_phone", phone.value.trim());
+    if (email.value.trim()) url.searchParams.set("client_email", email.value.trim());
+    if (notes.value.trim()) url.searchParams.set("notes", notes.value.trim());
+
+    bookBtn.disabled = true; // prevent double submits
+    const r = await fetch(url.toString(), { method: "POST" });
+    if (!r.ok) throw new Error(await r.text());
+    await r.json();
+
+    setMsg("🎉 Appointment booked! We’ll confirm with you shortly.", true);
+
+    // Reset time selection after booking
+    selectedTime = "";
+    renderTimes([]);
+    enableBookIfReady();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } catch (e) {
+    setMsg(`Booking failed: ${e.message}`, false);
+  } finally {
+    enableBookIfReady();
+  }
+});
+
+/** Init */
+(async function init() {
+  // default date = today, min = today
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth()+1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const today = `${yyyy}-${mm}-${dd}`;
+  dateInp.value = today;
+  dateInp.min = today;
+
+  // enable button when name fields change
+  [first, last].forEach(inp => inp.addEventListener("input", enableBookIfReady));
+
+  await loadSpecialties();
+
+  specialtySel.addEventListener("change", async () => {
+    selectedSpecialty = specialtySel.value || "";
+    selectedStaffId = null;
+    selectedService = null;
+    selectedTime = "";
+    setMsg("", true);
+    renderTimes([]);
+    enableBookIfReady();
+
+    if (!selectedSpecialty) {
+      staffGrid.innerHTML = "";
+      serviceGrid.innerHTML = "";
+      staffEmpty.style.display = "none";
+      serviceEmpty.style.display = "none";
+      return;
+    }
+    await Promise.all([
+      loadStaffFor(selectedSpecialty),
+      loadServicesFor(selectedSpecialty),
+    ]);
+    await loadAvailability();
+  });
+
+  dateInp.addEventListener("change", () => {
+    selectedTime = "";
+    renderTimes([]);
+    loadAvailability();
+    enableBookIfReady();
+  });
+
+  // initial hint
+  timesEmpty.style.display = "block";
+})();
+</script>
+</body>
+</html>

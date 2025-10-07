@@ -1,10 +1,9 @@
-
+# backend/app/deps.py
 import os
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from jose import JWTError, jwt
-
 from .database import get_db
 from . import models
 
@@ -30,3 +29,13 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     if user is None:
         raise credentials_exception
     return user
+
+def require_roles(*allowed_roles: str):
+    """
+    Usage: current_user = Depends(require_roles("owner", "receptionist"))
+    """
+    def _checker(current_user: models.User = Depends(get_current_user)):
+        if current_user.role not in allowed_roles:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return current_user
+    return _checker

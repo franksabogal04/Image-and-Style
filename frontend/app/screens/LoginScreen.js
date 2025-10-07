@@ -1,8 +1,11 @@
+// frontend/app/screens/LoginScreen.js
 import React, { useEffect, useState } from 'react';
 import {
   View, Text, TextInput, Button, Alert, Platform,
-  ActivityIndicator, Switch, useColorScheme, KeyboardAvoidingView, ScrollView
+  ActivityIndicator, Switch, useColorScheme,
+  KeyboardAvoidingView, ScrollView, Keyboard
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as SecureStore from 'expo-secure-store';
 import { API_BASE_URL } from '../config';
 
@@ -101,85 +104,91 @@ export default function LoginScreen({ onLogin }) {
 
   if (loading) {
     return (
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: C.bg }}>
+      <SafeAreaView style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: C.bg }}>
         <ActivityIndicator />
         <Text style={{ marginTop: 8, color: C.text }}>Checking saved session…</Text>
-      </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1, backgroundColor: C.bg }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ScrollView contentContainerStyle={{ padding: 20, paddingTop: 60 }}>
-        <Text style={{ fontSize: 22, fontWeight: '600', marginBottom: 16, color: C.text }}>Image & Style — Login</Text>
-        <Text style={{ color: C.sub, marginBottom: 12 }}>API: {API_BASE_URL}</Text>
+    <SafeAreaView style={{ flex: 1, backgroundColor: C.bg }}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ScrollView contentContainerStyle={{ padding: 20, paddingTop: 60 }} keyboardShouldPersistTaps="handled">
+          <Text style={{ fontSize: 22, fontWeight: '600', marginBottom: 16, color: C.text }}>Image & Style — Login</Text>
+          <Text style={{ color: C.sub, marginBottom: 12 }}>API: {API_BASE_URL}</Text>
 
-        <Text style={{ color: C.text, marginBottom: 6 }}>Email</Text>
-        <TextInput
-          placeholder="you@example.com"
-          placeholderTextColor={C.placeholder}
-          selectionColor={C.primary}
-          autoCapitalize="none"
-          keyboardType="email-address"
-          value={email}
-          onChangeText={setEmail}
-          style={{
-            color: C.text,
-            backgroundColor: C.inputBg,
-            borderWidth: 1, borderColor: C.border, borderRadius: 8,
-            padding: 12, marginBottom: 12
-          }}
-        />
-
-        <Text style={{ color: C.text, marginBottom: 6 }}>Password</Text>
-        <TextInput
-          placeholder="Your password"
-          placeholderTextColor={C.placeholder}
-          selectionColor={C.primary}
-          secureTextEntry
-          value={password}
-          onChangeText={setPassword}
-          style={{
-            color: C.text,
-            backgroundColor: C.inputBg,
-            borderWidth: 1, borderColor: C.border, borderRadius: 8,
-            padding: 12, marginBottom: 16
-          }}
-        />
-
-        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 16 }}>
-          <Switch
-            value={rememberMe}
-            onValueChange={setRememberMe}
-            trackColor={{ true: C.switchTrackTrue, false: C.switchTrackFalse }}
-            thumbColor={C.switchThumb}
+          <Text style={{ color: C.text, marginBottom: 6 }}>Email</Text>
+          <TextInput
+            placeholder="you@example.com"
+            placeholderTextColor={C.placeholder}
+            selectionColor={C.primary}
+            autoCapitalize="none"
+            keyboardType="email-address"
+            value={email}
+            onChangeText={setEmail}
+            style={{
+              color: C.text,
+              backgroundColor: C.inputBg,
+              borderWidth: 1, borderColor: C.border, borderRadius: 8,
+              padding: 12, marginBottom: 12
+            }}
+            returnKeyType="next"
+            onSubmitEditing={Keyboard.dismiss}
           />
-          <Text style={{ marginLeft: 8, color: C.text }}>Remember Me</Text>
-        </View>
 
-        <View style={{
-          borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: C.border,
-          marginBottom: 12, backgroundColor: C.card
-        }}>
-          <Button
-            title={submitting ? 'Logging in…' : 'Login'}
-            onPress={login}
-            disabled={submitting}
-            color={Platform.OS === 'ios' ? undefined : C.primary}
+          <Text style={{ color: C.text, marginBottom: 6 }}>Password</Text>
+          <TextInput
+            placeholder="Your password"
+            placeholderTextColor={C.placeholder}
+            selectionColor={C.primary}
+            secureTextEntry
+            value={password}
+            onChangeText={setPassword}
+            style={{
+              color: C.text,
+              backgroundColor: C.inputBg,
+              borderWidth: 1, borderColor: C.border, borderRadius: 8,
+              padding: 12, marginBottom: 16
+            }}
+            returnKeyType="done"
+            onSubmitEditing={Keyboard.dismiss}
           />
-        </View>
 
-        <View style={{
-          borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: C.border,
-          backgroundColor: C.card
-        }}>
-          <Button
-            title="Reset saved login"
-            onPress={resetSavedLogin}
-            color={Platform.OS === 'ios' ? undefined : C.mutedBtn}
-          />
-        </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 16 }}>
+            <Switch
+              value={rememberMe}
+              onValueChange={setRememberMe}
+              trackColor={{ true: C.switchTrackTrue, false: C.switchTrackFalse }}
+              thumbColor={C.switchThumb}
+            />
+            <Text style={{ marginLeft: 8, color: C.text }}>Remember Me</Text>
+          </View>
+
+          <View style={{
+            borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: C.border,
+            marginBottom: 12, backgroundColor: C.card
+          }}>
+            <Button
+              title={submitting ? 'Logging in…' : 'Login'}
+              onPress={login}
+              disabled={submitting}
+              color={Platform.OS === 'ios' ? undefined : C.primary}
+            />
+          </View>
+
+          <View style={{
+            borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: C.border,
+            backgroundColor: C.card
+          }}>
+            <Button
+              title="Reset saved login"
+              onPress={resetSavedLogin}
+              color={Platform.OS === 'ios' ? undefined : C.mutedBtn}
+            />
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
