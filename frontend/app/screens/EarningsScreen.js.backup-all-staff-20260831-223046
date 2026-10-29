@@ -1,0 +1,4171 @@
+// frontend/app/screens/EarningsScreen.js
+
+import React, {
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
+
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  Alert,
+  FlatList,
+  Keyboard,
+  TouchableWithoutFeedback,
+  useWindowDimensions,
+} from 'react-native';
+
+import {
+  API_BASE_URL,
+} from '../config';
+
+import {
+  COLORS,
+  RADIUS,
+  SHADOWS,
+} from '../theme';
+
+
+/* =========================================================
+   DATE HELPERS
+========================================================= */
+
+const pad = (number) =>
+  String(number).padStart(2, '0');
+
+
+function toISO(
+  year,
+  month,
+  day,
+  hour = 0,
+  minute = 0,
+  second = 0
+) {
+  return (
+    `${year}-` +
+    `${pad(month)}-` +
+    `${pad(day)}` +
+    `T${pad(hour)}:` +
+    `${pad(minute)}:` +
+    `${pad(second)}`
+  );
+}
+
+
+function parseMDY(value) {
+  if (!value) {
+    return null;
+  }
+
+  const parts =
+    value
+      .split('/')
+      .map(
+        (part) =>
+          part.trim()
+      );
+
+  if (
+    parts.length !== 3
+  ) {
+    return null;
+  }
+
+  const [
+    month,
+    day,
+    year,
+  ] =
+    parts.map(Number);
+
+  if (
+    !year ||
+    !month ||
+    !day
+  ) {
+    return null;
+  }
+
+  return {
+    y: year,
+    m: month,
+    d: day,
+  };
+}
+
+
+function parseTime12(value) {
+  if (!value) {
+    return {
+      hh: 0,
+      mm: 0,
+    };
+  }
+
+  const match =
+    String(value)
+      .trim()
+      .match(
+        /^(\d{1,2}):?(\d{2})?\s*(AM|PM)$/i
+      );
+
+  if (!match) {
+    return null;
+  }
+
+  let hour =
+    parseInt(
+      match[1],
+      10
+    );
+
+  const minute =
+    match[2]
+      ? parseInt(
+          match[2],
+          10
+        )
+      : 0;
+
+  const period =
+    match[3]
+      .toUpperCase();
+
+  if (
+    hour < 1 ||
+    hour > 12 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    return null;
+  }
+
+  if (
+    period === 'PM' &&
+    hour !== 12
+  ) {
+    hour += 12;
+  }
+
+  if (
+    period === 'AM' &&
+    hour === 12
+  ) {
+    hour = 0;
+  }
+
+  return {
+    hh: hour,
+    mm: minute,
+  };
+}
+
+
+function fmtMDY(value) {
+  return new Date(
+    value
+  ).toLocaleDateString(
+    'en-US',
+    {
+      month: '2-digit',
+      day: '2-digit',
+      year: 'numeric',
+    }
+  );
+}
+
+
+function fmtDateShort(value) {
+  return new Date(
+    value
+  ).toLocaleDateString(
+    'en-US',
+    {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    }
+  );
+}
+
+
+function fmtTime12(value) {
+  return new Date(
+    value
+  )
+    .toLocaleTimeString(
+      'en-US',
+      {
+        hour: 'numeric',
+        minute: '2-digit',
+      }
+    )
+    .replace(
+      'am',
+      'AM'
+    )
+    .replace(
+      'pm',
+      'PM'
+    );
+}
+
+
+function startOfToday() {
+  const date =
+    new Date();
+
+  return toISO(
+    date.getFullYear(),
+    date.getMonth() + 1,
+    date.getDate(),
+    0,
+    0,
+    0
+  );
+}
+
+
+function endOfToday() {
+  const date =
+    new Date();
+
+  return toISO(
+    date.getFullYear(),
+    date.getMonth() + 1,
+    date.getDate(),
+    23,
+    59,
+    59
+  );
+}
+
+
+function last7Days() {
+  const endDate =
+    new Date();
+
+  const startDate =
+    new Date(
+      endDate.getTime() -
+        6 *
+          24 *
+          60 *
+          60 *
+          1000
+    );
+
+  return {
+    start:
+      toISO(
+        startDate.getFullYear(),
+        startDate.getMonth() + 1,
+        startDate.getDate(),
+        0,
+        0,
+        0
+      ),
+
+    end:
+      toISO(
+        endDate.getFullYear(),
+        endDate.getMonth() + 1,
+        endDate.getDate(),
+        23,
+        59,
+        59
+      ),
+  };
+}
+
+
+function thisMonth() {
+  const date =
+    new Date();
+
+  const lastDay =
+    new Date(
+      date.getFullYear(),
+      date.getMonth() + 1,
+      0
+    ).getDate();
+
+  return {
+    start:
+      toISO(
+        date.getFullYear(),
+        date.getMonth() + 1,
+        1,
+        0,
+        0,
+        0
+      ),
+
+    end:
+      toISO(
+        date.getFullYear(),
+        date.getMonth() + 1,
+        lastDay,
+        23,
+        59,
+        59
+      ),
+  };
+}
+
+
+function lastMonth() {
+  const date =
+    new Date();
+
+  const previousMonth =
+    new Date(
+      date.getFullYear(),
+      date.getMonth() - 1,
+      1
+    );
+
+  const lastDay =
+    new Date(
+      previousMonth.getFullYear(),
+      previousMonth.getMonth() + 1,
+      0
+    ).getDate();
+
+  return {
+    start:
+      toISO(
+        previousMonth.getFullYear(),
+        previousMonth.getMonth() + 1,
+        1,
+        0,
+        0,
+        0
+      ),
+
+    end:
+      toISO(
+        previousMonth.getFullYear(),
+        previousMonth.getMonth() + 1,
+        lastDay,
+        23,
+        59,
+        59
+      ),
+  };
+}
+
+
+function yearToDate() {
+  const date =
+    new Date();
+
+  return {
+    start:
+      toISO(
+        date.getFullYear(),
+        1,
+        1,
+        0,
+        0,
+        0
+      ),
+
+    end:
+      toISO(
+        date.getFullYear(),
+        date.getMonth() + 1,
+        date.getDate(),
+        23,
+        59,
+        59
+      ),
+  };
+}
+
+
+const fmtPct = (value) =>
+  `${Math.round(
+    Number(
+      value ||
+      0
+    ) * 100
+  )}%`;
+
+
+const money = (value) =>
+  `$${Number(
+    value ||
+    0
+  ).toFixed(2)}`;
+
+
+/* =========================================================
+   SMALL UI COMPONENTS
+========================================================= */
+
+function Card({
+  children,
+  style,
+}) {
+  return (
+    <View
+      style={[
+        {
+          backgroundColor:
+            COLORS.white,
+
+          borderWidth: 1,
+
+          borderColor:
+            COLORS.border,
+
+          borderRadius:
+            RADIUS.large,
+
+          padding: 16,
+
+          ...SHADOWS.card,
+        },
+
+        style,
+      ]}
+    >
+      {children}
+    </View>
+  );
+}
+
+
+function SectionTitle({
+  title,
+  subtitle,
+}) {
+  return (
+    <View
+      style={{
+        marginBottom: 12,
+      }}
+    >
+      <Text
+        style={{
+          color:
+            COLORS.text,
+
+          fontSize: 19,
+
+          fontWeight: '800',
+        }}
+      >
+        {title}
+      </Text>
+
+      {!!subtitle && (
+        <Text
+          style={{
+            color:
+              COLORS.textMuted,
+
+            fontSize: 12,
+
+            marginTop: 3,
+
+            lineHeight: 17,
+          }}
+        >
+          {subtitle}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+
+function MetricCard({
+  title,
+  value,
+  subtitle,
+  emphasized = false,
+  style,
+}) {
+  return (
+    <View
+      style={[
+        {
+          flex: 1,
+
+          minWidth: 100,
+
+          backgroundColor:
+            emphasized
+              ? COLORS.royal
+              : COLORS.white,
+
+          borderRadius:
+            RADIUS.large,
+
+          borderWidth: 1,
+
+          borderColor:
+            emphasized
+              ? COLORS.royal
+              : COLORS.border,
+
+          padding: 15,
+
+          ...SHADOWS.card,
+        },
+
+        style,
+      ]}
+    >
+      <Text
+        style={{
+          color:
+            emphasized
+              ? 'rgba(255,255,255,0.75)'
+              : COLORS.textMuted,
+
+          fontSize: 12,
+
+          fontWeight: '700',
+        }}
+      >
+        {title}
+      </Text>
+
+      <Text
+        numberOfLines={1}
+        adjustsFontSizeToFit
+
+        style={{
+          color:
+            emphasized
+              ? COLORS.white
+              : COLORS.text,
+
+          fontSize: 21,
+
+          fontWeight: '800',
+
+          marginTop: 5,
+        }}
+      >
+        {money(value)}
+      </Text>
+
+      {!!subtitle && (
+        <Text
+          style={{
+            color:
+              emphasized
+                ? 'rgba(255,255,255,0.7)'
+                : COLORS.textMuted,
+
+            fontSize: 10,
+
+            marginTop: 5,
+          }}
+        >
+          {subtitle}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+
+function PresetButton({
+  label,
+  active,
+  onPress,
+}) {
+  return (
+    <TouchableOpacity
+      activeOpacity={0.8}
+      onPress={onPress}
+
+      style={{
+        minHeight: 42,
+
+        flexGrow: 1,
+
+        paddingHorizontal: 12,
+
+        borderRadius:
+          RADIUS.medium,
+
+        backgroundColor:
+          active
+            ? COLORS.royal
+            : COLORS.white,
+
+        borderWidth: 1,
+
+        borderColor:
+          active
+            ? COLORS.royal
+            : COLORS.border,
+
+        alignItems: 'center',
+
+        justifyContent:
+          'center',
+      }}
+    >
+      <Text
+        style={{
+          color:
+            active
+              ? COLORS.white
+              : COLORS.textSecondary,
+
+          fontSize: 12,
+
+          fontWeight:
+            active
+              ? '800'
+              : '700',
+        }}
+      >
+        {label}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
+
+function FieldLabel({
+  children,
+}) {
+  return (
+    <Text
+      style={{
+        color:
+          COLORS.textSecondary,
+
+        fontSize: 12,
+
+        fontWeight: '700',
+
+        marginBottom: 6,
+      }}
+    >
+      {children}
+    </Text>
+  );
+}
+
+
+function AppInput({
+  style,
+  ...props
+}) {
+  return (
+    <TextInput
+      placeholderTextColor={
+        COLORS.textMuted
+      }
+
+      selectionColor={
+        COLORS.royal
+      }
+
+      style={[
+        {
+          minHeight: 48,
+
+          backgroundColor:
+            COLORS.white,
+
+          borderWidth: 1,
+
+          borderColor:
+            COLORS.border,
+
+          borderRadius:
+            RADIUS.medium,
+
+          paddingHorizontal: 12,
+
+          color:
+            COLORS.text,
+
+          fontSize: 14,
+        },
+
+        style,
+      ]}
+
+      {...props}
+    />
+  );
+}
+
+
+function RevenueBar({
+  label,
+  value,
+  total,
+  index,
+}) {
+  const percentage =
+    total > 0
+      ? Math.min(
+          100,
+          Math.round(
+            (
+              value /
+              total
+            ) * 100
+          )
+        )
+      : 0;
+
+
+  const barColors = [
+    COLORS.royal,
+    '#3566C8',
+    '#5E85D6',
+    '#84A4E1',
+    '#A7BEEA',
+  ];
+
+
+  const barColor =
+    barColors[
+      index %
+      barColors.length
+    ];
+
+
+  return (
+    <View
+      style={{
+        marginBottom: 16,
+      }}
+    >
+      <View
+        style={{
+          flexDirection: 'row',
+
+          justifyContent:
+            'space-between',
+
+          alignItems: 'center',
+
+          marginBottom: 7,
+        }}
+      >
+        <Text
+          style={{
+            color:
+              COLORS.text,
+
+            fontSize: 13,
+
+            fontWeight: '700',
+
+            flex: 1,
+          }}
+        >
+          {label}
+        </Text>
+
+        <Text
+          style={{
+            color:
+              COLORS.textSecondary,
+
+            fontSize: 12,
+
+            fontWeight: '700',
+          }}
+        >
+          {money(value)}
+          {'  '}
+          {percentage}%
+        </Text>
+      </View>
+
+
+      <View
+        style={{
+          height: 9,
+
+          borderRadius: 999,
+
+          overflow: 'hidden',
+
+          backgroundColor:
+            COLORS.surfaceSoft,
+        }}
+      >
+        <View
+          style={{
+            height: '100%',
+
+            width:
+              `${percentage}%`,
+
+            minWidth:
+              percentage > 0
+                ? 5
+                : 0,
+
+            borderRadius: 999,
+
+            backgroundColor:
+              barColor,
+          }}
+        />
+      </View>
+    </View>
+  );
+}
+
+
+function TaxMetric({
+  title,
+  amount,
+  rate,
+  accent = false,
+}) {
+  return (
+    <View
+      style={{
+        flex: 1,
+
+        minWidth: 95,
+
+        padding: 13,
+
+        borderRadius:
+          RADIUS.medium,
+
+        backgroundColor:
+          accent
+            ? COLORS.blueSoft
+            : COLORS.surfaceSoft,
+      }}
+    >
+      <Text
+        style={{
+          color:
+            COLORS.textMuted,
+
+          fontSize: 11,
+
+          fontWeight: '700',
+
+          lineHeight: 15,
+        }}
+      >
+        {title}
+      </Text>
+
+      {rate !== undefined && (
+        <Text
+          style={{
+            color:
+              COLORS.royal,
+
+            fontSize: 11,
+
+            fontWeight: '800',
+
+            marginTop: 5,
+          }}
+        >
+          {fmtPct(rate)}
+        </Text>
+      )}
+
+      <Text
+        adjustsFontSizeToFit
+        numberOfLines={1}
+
+        style={{
+          color:
+            COLORS.text,
+
+          fontSize: 18,
+
+          fontWeight: '800',
+
+          marginTop: 3,
+        }}
+      >
+        {money(amount)}
+      </Text>
+    </View>
+  );
+}
+
+
+/* =========================================================
+   MAIN SCREEN
+========================================================= */
+
+export default function EarningsScreen({
+  token,
+  me,
+}) {
+  const {
+    width,
+  } =
+    useWindowDimensions();
+
+
+  const isPhone =
+    width < 700;
+
+  const isTablet =
+    width >= 700 &&
+    width < 1100;
+
+  const isDesktop =
+    width >= 1100;
+
+
+  const contentPadding =
+    isDesktop
+      ? 28
+      : isTablet
+        ? 22
+        : 16;
+
+
+  const role =
+    me?.role ??
+    'staff';
+
+
+  const isOwnerOrReception =
+    role === 'owner' ||
+    role === 'receptionist';
+
+
+  const authHeaders =
+    useMemo(
+      () => ({
+        Authorization:
+          `Bearer ${token}`,
+
+        'Content-Type':
+          'application/json',
+      }),
+      [token]
+    );
+
+
+  const initialMonth =
+    useMemo(
+      () =>
+        thisMonth(),
+      []
+    );
+
+
+  const [
+    start,
+    setStart,
+  ] =
+    useState(
+      initialMonth.start
+    );
+
+
+  const [
+    end,
+    setEnd,
+  ] =
+    useState(
+      initialMonth.end
+    );
+
+
+  const [
+    mdyStart,
+    setMdyStart,
+  ] =
+    useState(
+      fmtMDY(
+        initialMonth.start
+      )
+    );
+
+
+  const [
+    mdyEnd,
+    setMdyEnd,
+  ] =
+    useState(
+      fmtMDY(
+        initialMonth.end
+      )
+    );
+
+
+  const [
+    timeStart,
+    setTimeStart,
+  ] =
+    useState(
+      '12:00 AM'
+    );
+
+
+  const [
+    timeEnd,
+    setTimeEnd,
+  ] =
+    useState(
+      '11:59 PM'
+    );
+
+
+  const [
+    activePreset,
+    setActivePreset,
+  ] =
+    useState('tm');
+
+
+  const [
+    loading,
+    setLoading,
+  ] =
+    useState(true);
+
+
+  const [
+    summary,
+    setSummary,
+  ] =
+    useState({
+      services_total:
+        0,
+
+      staff_service_earnings:
+        0,
+
+      owner_service_share:
+        0,
+
+      tips_total:
+        0,
+
+      sales_total:
+        0,
+
+      product_commission:
+        0,
+
+      salon_retail_share:
+        0,
+
+      grand_total:
+        0,
+    });
+
+
+  const [
+    appointments,
+    setAppointments,
+  ] =
+    useState([]);
+
+
+  const [
+    clients,
+    setClients,
+  ] =
+    useState([]);
+
+
+  const [
+    staff,
+    setStaff,
+  ] =
+    useState([]);
+
+
+  const [
+    byStaff,
+    setByStaff,
+  ] =
+    useState({
+      staff: [],
+
+      totals: {
+        services_total:
+          0,
+
+        staff_service_earnings:
+          0,
+
+        owner_service_share:
+          0,
+
+        tips_total:
+          0,
+
+        sales_total:
+          0,
+
+        staff_earnings_total:
+          0,
+
+        grand_total:
+          0,
+      },
+    });
+
+
+  const [
+    taxes,
+    setTaxes,
+  ] =
+    useState(null);
+
+
+  /* =====================================================
+     API
+  ===================================================== */
+
+  async function fetchOk(
+    url,
+    options
+  ) {
+    const response =
+      await fetch(
+        url,
+        options
+      );
+
+    if (!response.ok) {
+      const text =
+        await response.text();
+
+      throw new Error(
+        `${response.status} ${text}`
+      );
+    }
+
+    return response;
+  }
+
+
+  const makeRangeURL =
+    (
+      endpoint,
+      rangeStart,
+      rangeEnd
+    ) => {
+      const url =
+        new URL(
+          `${API_BASE_URL}${endpoint}`
+        );
+
+      if (rangeStart) {
+        url.searchParams.set(
+          'start',
+          rangeStart
+        );
+      }
+
+      if (rangeEnd) {
+        url.searchParams.set(
+          'end',
+          rangeEnd
+        );
+      }
+
+      return url;
+    };
+
+
+  const loadAll =
+    async (
+      rangeStart = start,
+      rangeEnd = end
+    ) => {
+      const summaryURL =
+        makeRangeURL(
+          '/earnings/',
+          rangeStart,
+          rangeEnd
+        );
+
+
+      const appointmentsURL =
+        makeRangeURL(
+          '/appointments/',
+          rangeStart,
+          rangeEnd
+        );
+
+
+      const taxesURL =
+        makeRangeURL(
+          '/earnings/taxes',
+          rangeStart,
+          rangeEnd
+        );
+
+
+      const tasks = [
+        fetchOk(
+          summaryURL.toString(),
+          {
+            headers:
+              authHeaders,
+          }
+        )
+          .then(
+            (response) =>
+              response.json()
+          )
+          .then(
+            setSummary
+          ),
+
+        fetchOk(
+          appointmentsURL.toString(),
+          {
+            headers:
+              authHeaders,
+          }
+        )
+          .then(
+            (response) =>
+              response.json()
+          )
+          .then(
+            (data) =>
+              setAppointments(
+                Array.isArray(
+                  data
+                )
+                  ? data
+                  : []
+              )
+          ),
+
+        fetchOk(
+          `${API_BASE_URL}/clients/search?limit=200`,
+          {
+            headers:
+              authHeaders,
+          }
+        )
+          .then(
+            (response) =>
+              response.json()
+          )
+          .then(
+            (data) =>
+              setClients(
+                Array.isArray(
+                  data
+                )
+                  ? data
+                  : []
+              )
+          ),
+
+        fetchOk(
+          taxesURL.toString(),
+          {
+            headers:
+              authHeaders,
+          }
+        )
+          .then(
+            (response) =>
+              response.json()
+          )
+          .then(
+            setTaxes
+          )
+          .catch(
+            (error) =>
+              setTaxes({
+                error:
+                  String(
+                    error.message ||
+                    error
+                  ),
+              })
+          ),
+      ];
+
+
+      if (
+        isOwnerOrReception
+      ) {
+        const staffTotalsURL =
+          makeRangeURL(
+            '/earnings/by-staff',
+            rangeStart,
+            rangeEnd
+          );
+
+
+        tasks.push(
+          fetchOk(
+            staffTotalsURL.toString(),
+            {
+              headers:
+                authHeaders,
+            }
+          )
+            .then(
+              (response) =>
+                response.json()
+            )
+            .then(
+              setByStaff
+            )
+        );
+
+
+        tasks.push(
+          fetchOk(
+            `${API_BASE_URL}/users/?role=staff`,
+            {
+              headers:
+                authHeaders,
+            }
+          )
+            .then(
+              (response) =>
+                response.json()
+            )
+            .then(
+              (data) =>
+                setStaff(
+                  Array.isArray(
+                    data
+                  )
+                    ? data
+                    : []
+                )
+            )
+        );
+      } else {
+        setByStaff({
+          staff: [],
+
+          totals: {
+            services_total:
+              0,
+
+            staff_service_earnings:
+              0,
+
+            owner_service_share:
+              0,
+
+            tips_total:
+              0,
+
+            sales_total:
+              0,
+
+            staff_earnings_total:
+              0,
+
+            grand_total:
+              0,
+          },
+        });
+
+        setStaff([]);
+      }
+
+
+      await Promise.all(
+        tasks
+      );
+    };
+
+
+  useEffect(
+    () => {
+      (
+        async () => {
+          try {
+            await loadAll(
+              initialMonth.start,
+              initialMonth.end
+            );
+          } catch (
+            error
+          ) {
+            Alert.alert(
+              'Error',
+              String(
+                error.message ||
+                error
+              )
+            );
+          } finally {
+            setLoading(
+              false
+            );
+          }
+        }
+      )();
+    },
+    []
+  );
+
+
+  /* =====================================================
+     NAMES
+  ===================================================== */
+
+  const getClientName =
+    (
+      id
+    ) => {
+      const client =
+        clients.find(
+          (item) =>
+            item.id ===
+            id
+        );
+
+      return client
+        ? `${client.first_name || ''} ${client.last_name || ''}`.trim()
+        : `Client #${id}`;
+    };
+
+
+  const getStaffName =
+    (
+      id
+    ) => {
+      if (
+        id === me?.id &&
+        me?.name
+      ) {
+        return me.name;
+      }
+
+      const person =
+        staff.find(
+          (item) =>
+            item.id ===
+            id
+        );
+
+      return (
+        person?.name ||
+        `Staff #${id}`
+      );
+    };
+
+
+  /* =====================================================
+     FILTERS
+  ===================================================== */
+
+  const presets = [
+    {
+      id: 'today',
+      label: 'Today',
+    },
+
+    {
+      id: '7d',
+      label: '7 Days',
+    },
+
+    {
+      id: 'tm',
+      label: 'This Month',
+    },
+
+    {
+      id: 'lm',
+      label: 'Last Month',
+    },
+
+    {
+      id: 'ytd',
+      label: 'YTD',
+    },
+  ];
+
+
+  const rangeForPreset =
+    (
+      id
+    ) => {
+      switch (id) {
+        case 'today':
+          return {
+            start:
+              startOfToday(),
+
+            end:
+              endOfToday(),
+          };
+
+        case '7d':
+          return last7Days();
+
+        case 'lm':
+          return lastMonth();
+
+        case 'ytd':
+          return yearToDate();
+
+        case 'tm':
+        default:
+          return thisMonth();
+      }
+    };
+
+
+  const onPresetPress =
+    async (
+      id
+    ) => {
+      try {
+        setLoading(true);
+
+        const range =
+          rangeForPreset(
+            id
+          );
+
+
+        setActivePreset(
+          id
+        );
+
+        setStart(
+          range.start
+        );
+
+        setEnd(
+          range.end
+        );
+
+        setMdyStart(
+          fmtMDY(
+            range.start
+          )
+        );
+
+        setMdyEnd(
+          fmtMDY(
+            range.end
+          )
+        );
+
+        setTimeStart(
+          '12:00 AM'
+        );
+
+        setTimeEnd(
+          '11:59 PM'
+        );
+
+
+        await loadAll(
+          range.start,
+          range.end
+        );
+      } catch (
+        error
+      ) {
+        Alert.alert(
+          'Error',
+          String(
+            error.message ||
+            error
+          )
+        );
+      } finally {
+        setLoading(
+          false
+        );
+      }
+    };
+
+
+  const applyDates =
+    async () => {
+      try {
+        const parsedStart =
+          parseMDY(
+            mdyStart
+          );
+
+        const parsedEnd =
+          parseMDY(
+            mdyEnd
+          );
+
+
+        if (
+          !parsedStart ||
+          !parsedEnd
+        ) {
+          return Alert.alert(
+            'Invalid date',
+            'Use MM/DD/YYYY for both dates.'
+          );
+        }
+
+
+        const parsedStartTime =
+          parseTime12(
+            timeStart
+          );
+
+        const parsedEndTime =
+          parseTime12(
+            timeEnd
+          );
+
+
+        if (
+          !parsedStartTime ||
+          !parsedEndTime
+        ) {
+          return Alert.alert(
+            'Invalid time',
+            'Use a time like 9:00 AM or 11:59 PM.'
+          );
+        }
+
+
+        const nextStart =
+          toISO(
+            parsedStart.y,
+            parsedStart.m,
+            parsedStart.d,
+            parsedStartTime.hh,
+            parsedStartTime.mm,
+            0
+          );
+
+
+        const nextEnd =
+          toISO(
+            parsedEnd.y,
+            parsedEnd.m,
+            parsedEnd.d,
+            parsedEndTime.hh,
+            parsedEndTime.mm,
+            59
+          );
+
+
+        if (
+          new Date(
+            nextEnd
+          ) <
+          new Date(
+            nextStart
+          )
+        ) {
+          return Alert.alert(
+            'Invalid range',
+            'The end date must be after the start date.'
+          );
+        }
+
+
+        setLoading(
+          true
+        );
+
+        setStart(
+          nextStart
+        );
+
+        setEnd(
+          nextEnd
+        );
+
+        setActivePreset(
+          null
+        );
+
+
+        await loadAll(
+          nextStart,
+          nextEnd
+        );
+
+
+        Keyboard.dismiss();
+      } catch (
+        error
+      ) {
+        Alert.alert(
+          'Error',
+          String(
+            error.message ||
+            error
+          )
+        );
+      } finally {
+        setLoading(
+          false
+        );
+      }
+    };
+
+
+  /* =====================================================
+     REVENUE MIX
+  ===================================================== */
+
+  const revenueMix =
+    useMemo(
+      () => {
+        const staffMap =
+          new Map(
+            staff.map(
+              (person) => [
+                person.id,
+                person,
+              ]
+            )
+          );
+
+
+        if (
+          !isOwnerOrReception &&
+          me?.id
+        ) {
+          staffMap.set(
+            me.id,
+            {
+              id: me.id,
+
+              name:
+                me.name,
+
+              profession:
+                me.profession,
+            }
+          );
+        }
+
+
+        const groups =
+          new Map();
+
+
+        appointments.forEach(
+          (
+            appointment
+          ) => {
+            const person =
+              staffMap.get(
+                appointment.staff_id
+              );
+
+
+            const profession =
+              (
+                person?.profession ||
+                'other'
+              )
+                .trim()
+                .toLowerCase();
+
+
+            const amount =
+              Number(
+                appointment.price ||
+                0
+              ) +
+              Number(
+                appointment.tip ||
+                0
+              );
+
+
+            groups.set(
+              profession,
+              (
+                groups.get(
+                  profession
+                ) ||
+                0
+              ) +
+              amount
+            );
+          }
+        );
+
+
+        const data =
+          Array.from(
+            groups.entries()
+          )
+            .map(
+              ([
+                key,
+                value,
+              ]) => ({
+                key,
+
+                label:
+                  key
+                    .charAt(0)
+                    .toUpperCase() +
+                  key.slice(1),
+
+                value,
+              })
+            )
+            .sort(
+              (
+                a,
+                b
+              ) =>
+                b.value -
+                a.value
+            );
+
+
+        if (
+          Number(
+            summary.sales_total ||
+            0
+          ) > 0
+        ) {
+          data.push({
+            key:
+              '__retail__',
+
+            label:
+              'Retail',
+
+            value:
+              Number(
+                summary.sales_total
+              ),
+          });
+        }
+
+
+        return data;
+      },
+      [
+        appointments,
+        staff,
+        summary.sales_total,
+        isOwnerOrReception,
+        me?.id,
+        me?.name,
+        me?.profession,
+      ]
+    );
+      /* =====================================================
+     TAX SECTION
+  ===================================================== */
+
+  const TaxSection =
+  () => {
+    if (!taxes) {
+      return null;
+    }
+
+
+    if (
+      taxes.error
+    ) {
+      return (
+        <View
+          style={{
+            marginTop: 22,
+          }}
+        >
+          <SectionTitle
+            title="Estimated Tax Reserve"
+
+            subtitle="Planning estimate based on the selected earnings period."
+          />
+
+          <Card>
+            <Text
+              style={{
+                color:
+                  COLORS.danger,
+
+                fontWeight:
+                  '700',
+              }}
+            >
+              Tax estimate unavailable
+            </Text>
+
+            <Text
+              style={{
+                color:
+                  COLORS.textMuted,
+
+                fontSize: 12,
+
+                marginTop: 5,
+
+                lineHeight: 17,
+              }}
+            >
+              {taxes.error}
+            </Text>
+          </Card>
+        </View>
+      );
+    }
+
+
+    if (
+      taxes.scope ===
+      'staff'
+    ) {
+      const gross =
+        taxes?.totals
+          ?.gross_comp ??
+        0;
+
+      const rate =
+        taxes?.estimates
+          ?.applied_rate ??
+        0;
+
+      const estimate =
+        taxes?.estimates
+          ?.personal_income_tax ??
+        0;
+
+      const remaining =
+        Math.max(
+          0,
+          Number(gross) -
+            Number(
+              estimate
+            )
+        );
+
+
+      return (
+        <View
+          style={{
+            marginTop: 22,
+          }}
+        >
+          <SectionTitle
+            title="Estimated Tax Reserve"
+
+            subtitle="A planning estimate of money you may want to reserve for year-end income taxes."
+          />
+
+          <Card>
+            <View
+              style={{
+                backgroundColor:
+                  COLORS.blueSoft,
+
+                borderRadius:
+                  RADIUS.large,
+
+                padding: 18,
+
+                marginBottom:
+                  14,
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    COLORS.royal,
+
+                  fontSize: 12,
+
+                  fontWeight:
+                    '800',
+
+                  textTransform:
+                    'uppercase',
+
+                  letterSpacing:
+                    0.7,
+                }}
+              >
+                Suggested reserve
+              </Text>
+
+              <Text
+                style={{
+                  color:
+                    COLORS.royal,
+
+                  fontSize: 30,
+
+                  fontWeight:
+                    '900',
+
+                  marginTop: 4,
+                }}
+              >
+                {money(
+                  estimate
+                )}
+              </Text>
+
+              <Text
+                style={{
+                  color:
+                    COLORS.textSecondary,
+
+                  fontSize: 12,
+
+                  marginTop: 5,
+                }}
+              >
+                Based on an estimated{' '}
+                {fmtPct(
+                  rate
+                )}{' '}
+                rate
+              </Text>
+            </View>
+
+
+            <View
+              style={{
+                flexDirection:
+                  'row',
+
+                gap: 10,
+              }}
+            >
+              <TaxMetric
+                title="Gross earnings"
+
+                amount={
+                  gross
+                }
+              />
+
+              <TaxMetric
+                title="After reserve"
+
+                amount={
+                  remaining
+                }
+              />
+            </View>
+
+
+            <View
+              style={{
+                marginTop: 15,
+
+                paddingTop: 14,
+
+                borderTopWidth:
+                  1,
+
+                borderTopColor:
+                  COLORS.border,
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    COLORS.textMuted,
+
+                  fontSize: 11,
+
+                  lineHeight: 16,
+                }}
+              >
+                This is a rough planning estimate, not your final tax bill. Actual taxes can vary based on filing status, deductions, classification, other income and other factors.
+              </Text>
+            </View>
+          </Card>
+        </View>
+      );
+    }
+
+
+    const serviceTax =
+      taxes
+        ?.collected_transaction_taxes
+        ?.service_tax ??
+      {};
+
+
+    const retailTax =
+      taxes
+        ?.collected_transaction_taxes
+        ?.retail_tax ??
+      {};
+
+
+    const ownerIncome =
+      taxes
+        ?.owner_income_tax_estimate ??
+      {};
+
+
+    const staffEstimates =
+      Array.isArray(
+        taxes
+          ?.per_staff_income_tax_estimates
+      )
+        ? taxes
+            .per_staff_income_tax_estimates
+        : [];
+
+
+    return (
+      <View
+        style={{
+          marginTop: 22,
+        }}
+      >
+        <SectionTitle
+          title="Tax Overview"
+
+          subtitle="Transaction-tax totals and estimated income-tax reserves for this period."
+        />
+
+
+        <Card>
+          <View
+            style={{
+              flexDirection:
+                'row',
+
+              flexWrap:
+                'wrap',
+
+              gap: 10,
+            }}
+          >
+            <TaxMetric
+              title="Service Tax"
+
+              rate={
+                serviceTax.rate ||
+                0
+              }
+
+              amount={
+                serviceTax.amount ||
+                0
+              }
+            />
+
+            <TaxMetric
+              title="Retail Tax"
+
+              rate={
+                retailTax.rate ||
+                0
+              }
+
+              amount={
+                retailTax.amount ||
+                0
+              }
+            />
+
+            <TaxMetric
+              title="Owner Tax Reserve"
+
+              rate={
+                ownerIncome.rate ||
+                0
+              }
+
+              amount={
+                ownerIncome.amount ||
+                0
+              }
+
+              accent
+            />
+          </View>
+
+
+          <Text
+            style={{
+              color:
+                COLORS.textMuted,
+
+              fontSize: 11,
+
+              lineHeight: 16,
+
+              marginTop: 13,
+            }}
+          >
+            Income-tax amounts are planning estimates rather than final tax liability.
+          </Text>
+        </Card>
+
+
+        <Card
+          style={{
+            marginTop: 12,
+          }}
+        >
+          <Text
+            style={{
+              color:
+                COLORS.text,
+
+              fontSize: 16,
+
+              fontWeight:
+                '800',
+            }}
+          >
+            Staff Estimated Tax Reserve
+          </Text>
+
+          <Text
+            style={{
+              color:
+                COLORS.textMuted,
+
+              fontSize: 11,
+
+              marginTop: 3,
+
+              marginBottom: 8,
+            }}
+          >
+            Estimated personal income-tax reserve by employee.
+          </Text>
+
+
+          {staffEstimates.length ===
+          0 ? (
+            <Text
+              style={{
+                color:
+                  COLORS.textMuted,
+
+                paddingVertical:
+                  14,
+              }}
+            >
+              No staff earnings in this range.
+            </Text>
+          ) : (
+            staffEstimates.map(
+              (
+                person,
+                index
+              ) => (
+                <View
+                  key={
+                    person.staff_id
+                  }
+
+                  style={{
+                    paddingVertical:
+                      14,
+
+                    borderTopWidth:
+                      index === 0
+                        ? 0
+                        : 1,
+
+                    borderTopColor:
+                      COLORS.border,
+                  }}
+                >
+                  <View
+                    style={{
+                      flexDirection:
+                        'row',
+
+                      alignItems:
+                        'center',
+
+                      justifyContent:
+                        'space-between',
+
+                      marginBottom:
+                        10,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.text,
+
+                        fontSize: 14,
+
+                        fontWeight:
+                          '800',
+                      }}
+                    >
+                      {person.staff_name}
+                    </Text>
+
+                    <View
+                      style={{
+                        backgroundColor:
+                          COLORS.blueSoft,
+
+                        borderRadius:
+                          RADIUS.round,
+
+                        paddingHorizontal:
+                          9,
+
+                        paddingVertical:
+                          4,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royal,
+
+                          fontSize: 11,
+
+                          fontWeight:
+                            '800',
+                        }}
+                      >
+                        {fmtPct(
+                          person.applied_rate ||
+                          0
+                        )}
+                      </Text>
+                    </View>
+                  </View>
+
+
+                  <View
+                    style={{
+                      flexDirection:
+                        'row',
+
+                      gap: 10,
+                    }}
+                  >
+                    <View
+                      style={{
+                        flex: 1,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.textMuted,
+
+                          fontSize: 10,
+
+                          fontWeight:
+                            '700',
+                        }}
+                      >
+                        GROSS COMP
+                      </Text>
+
+                      <Text
+                        style={{
+                          color:
+                            COLORS.text,
+
+                          fontSize: 16,
+
+                          fontWeight:
+                            '800',
+
+                          marginTop: 3,
+                        }}
+                      >
+                        {money(
+                          person.gross_comp ||
+                          0
+                        )}
+                      </Text>
+                    </View>
+
+
+                    <View
+                      style={{
+                        flex: 1,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.textMuted,
+
+                          fontSize: 10,
+
+                          fontWeight:
+                            '700',
+                        }}
+                      >
+                        EST. RESERVE
+                      </Text>
+
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royal,
+
+                          fontSize: 16,
+
+                          fontWeight:
+                            '900',
+
+                          marginTop: 3,
+                        }}
+                      >
+                        {money(
+                          person.estimated_personal_income_tax ||
+                          0
+                        )}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+              )
+            )
+          )}
+        </Card>
+      </View>
+    );
+  };
+
+
+/* =====================================================
+   STAFF SECTION
+===================================================== */
+
+const StaffSection =
+  () => {
+    if (
+      !isOwnerOrReception
+    ) {
+      return null;
+    }
+
+
+    const staffRows =
+      Array.isArray(
+        byStaff.staff
+      )
+        ? byStaff.staff
+        : [];
+
+
+    const totalStaffEarnings =
+      Number(
+        byStaff
+          ?.totals
+          ?.staff_earnings_total ||
+        0
+      );
+
+
+    return (
+      <View
+        style={{
+          marginTop:
+            22,
+        }}
+      >
+        <SectionTitle
+          title="Team Earnings"
+
+          subtitle="Employee earnings based on 80% of service revenue plus 100% of tips."
+        />
+
+
+        <Card>
+          <Text
+            style={{
+              color:
+                COLORS.textMuted,
+
+              fontSize:
+                11,
+
+              fontWeight:
+                '700',
+            }}
+          >
+            ALL STAFF EARNINGS
+          </Text>
+
+
+          <Text
+            style={{
+              color:
+                COLORS.text,
+
+              fontSize:
+                27,
+
+              fontWeight:
+                '900',
+
+              marginTop:
+                4,
+            }}
+          >
+            {money(
+              totalStaffEarnings
+            )}
+          </Text>
+
+
+          <View
+            style={{
+              flexDirection:
+                'row',
+
+              flexWrap:
+                'wrap',
+
+              gap:
+                10,
+
+              marginTop:
+                14,
+            }}
+          >
+            <View
+              style={{
+                flex:
+                  1,
+
+                minWidth:
+                  100,
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    COLORS.textMuted,
+
+                  fontSize:
+                    10,
+                }}
+              >
+                SERVICE REVENUE
+              </Text>
+
+              <Text
+                style={{
+                  color:
+                    COLORS.text,
+
+                  fontWeight:
+                    '800',
+
+                  marginTop:
+                    3,
+                }}
+              >
+                {money(
+                  byStaff
+                    ?.totals
+                    ?.services_total
+                )}
+              </Text>
+            </View>
+
+
+            <View
+              style={{
+                flex:
+                  1,
+
+                minWidth:
+                  100,
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    COLORS.textMuted,
+
+                  fontSize:
+                    10,
+                }}
+              >
+                STAFF 80%
+              </Text>
+
+              <Text
+                style={{
+                  color:
+                    COLORS.royal,
+
+                  fontWeight:
+                    '800',
+
+                  marginTop:
+                    3,
+                }}
+              >
+                {money(
+                  byStaff
+                    ?.totals
+                    ?.staff_service_earnings
+                )}
+              </Text>
+            </View>
+
+
+            <View
+              style={{
+                flex:
+                  1,
+
+                minWidth:
+                  100,
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    COLORS.textMuted,
+
+                  fontSize:
+                    10,
+                }}
+              >
+                OWNER 20%
+              </Text>
+
+              <Text
+                style={{
+                  color:
+                    COLORS.text,
+
+                  fontWeight:
+                    '800',
+
+                  marginTop:
+                    3,
+                }}
+              >
+                {money(
+                  byStaff
+                    ?.totals
+                    ?.owner_service_share
+                )}
+              </Text>
+            </View>
+
+
+            <View
+              style={{
+                flex:
+                  1,
+
+                minWidth:
+                  100,
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    COLORS.textMuted,
+
+                  fontSize:
+                    10,
+                }}
+              >
+                TIPS
+              </Text>
+
+              <Text
+                style={{
+                  color:
+                    COLORS.text,
+
+                  fontWeight:
+                    '800',
+
+                  marginTop:
+                    3,
+                }}
+              >
+                {money(
+                  byStaff
+                    ?.totals
+                    ?.tips_total
+                )}
+              </Text>
+            </View>
+
+
+            <View
+              style={{
+                flex:
+                  1,
+
+                minWidth:
+                  100,
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    COLORS.textMuted,
+
+                  fontSize:
+                    10,
+                }}
+              >
+                RETAIL
+              </Text>
+
+              <Text
+                style={{
+                  color:
+                    COLORS.text,
+
+                  fontWeight:
+                    '800',
+
+                  marginTop:
+                    3,
+                }}
+              >
+                {money(
+                  byStaff
+                    ?.totals
+                    ?.sales_total
+                )}
+              </Text>
+            </View>
+          </View>
+        </Card>
+
+
+        {staffRows.map(
+          (
+            person,
+            index
+          ) => {
+            const employeeEarnings =
+              Number(
+                person
+                  .staff_earnings_total ||
+                0
+              );
+
+
+            const share =
+              totalStaffEarnings >
+              0
+                ? Math.round(
+                    (
+                      employeeEarnings /
+                      totalStaffEarnings
+                    ) *
+                      100
+                  )
+                : 0;
+
+
+            return (
+              <Card
+                key={
+                  person.staff_id
+                }
+
+                style={{
+                  marginTop:
+                    10,
+                }}
+              >
+                <View
+                  style={{
+                    flexDirection:
+                      'row',
+
+                    alignItems:
+                      'center',
+                  }}
+                >
+                  <View
+                    style={{
+                      width:
+                        34,
+
+                      height:
+                        34,
+
+                      borderRadius:
+                        17,
+
+                      alignItems:
+                        'center',
+
+                      justifyContent:
+                        'center',
+
+                      backgroundColor:
+                        COLORS.blueSoft,
+
+                      marginRight:
+                        10,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.royal,
+
+                        fontWeight:
+                          '900',
+
+                        fontSize:
+                          12,
+                      }}
+                    >
+                      {index + 1}
+                    </Text>
+                  </View>
+
+
+                  <View
+                    style={{
+                      flex:
+                        1,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.text,
+
+                        fontSize:
+                          15,
+
+                        fontWeight:
+                          '800',
+                      }}
+                    >
+                      {
+                        person
+                          .staff_name
+                      }
+                    </Text>
+
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          11,
+
+                        marginTop:
+                          2,
+                      }}
+                    >
+                      {share}% of team earnings
+                    </Text>
+                  </View>
+
+
+                  <View
+                    style={{
+                      alignItems:
+                        'flex-end',
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.royal,
+
+                        fontSize:
+                          16,
+
+                        fontWeight:
+                          '900',
+                      }}
+                    >
+                      {money(
+                        employeeEarnings
+                      )}
+                    </Text>
+
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          10,
+
+                        marginTop:
+                          2,
+                      }}
+                    >
+                      employee earnings
+                    </Text>
+                  </View>
+                </View>
+
+
+                <View
+                  style={{
+                    height:
+                      7,
+
+                    borderRadius:
+                      99,
+
+                    backgroundColor:
+                      COLORS.surfaceSoft,
+
+                    overflow:
+                      'hidden',
+
+                    marginTop:
+                      12,
+                  }}
+                >
+                  <View
+                    style={{
+                      height:
+                        '100%',
+
+                      width:
+                        `${share}%`,
+
+                      backgroundColor:
+                        COLORS.royal,
+
+                      borderRadius:
+                        99,
+                    }}
+                  />
+                </View>
+
+
+                <View
+                  style={{
+                    flexDirection:
+                      'row',
+
+                    flexWrap:
+                      'wrap',
+
+                    gap:
+                      10,
+
+                    marginTop:
+                      14,
+                  }}
+                >
+                  <View
+                    style={{
+                      flex:
+                        1,
+
+                      minWidth:
+                        105,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          10,
+                      }}
+                    >
+                      SERVICE REVENUE
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.text,
+
+                        fontSize:
+                          13,
+
+                        fontWeight:
+                          '800',
+
+                        marginTop:
+                          3,
+                      }}
+                    >
+                      {money(
+                        person
+                          .services_total
+                      )}
+                    </Text>
+                  </View>
+
+
+                  <View
+                    style={{
+                      flex:
+                        1,
+
+                      minWidth:
+                        105,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          10,
+                      }}
+                    >
+                      STAFF 80%
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.royal,
+
+                        fontSize:
+                          13,
+
+                        fontWeight:
+                          '900',
+
+                        marginTop:
+                          3,
+                      }}
+                    >
+                      {money(
+                        person
+                          .staff_service_earnings
+                      )}
+                    </Text>
+                  </View>
+
+
+                  <View
+                    style={{
+                      flex:
+                        1,
+
+                      minWidth:
+                        105,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          10,
+                      }}
+                    >
+                      OWNER 20%
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.text,
+
+                        fontSize:
+                          13,
+
+                        fontWeight:
+                          '800',
+
+                        marginTop:
+                          3,
+                      }}
+                    >
+                      {money(
+                        person
+                          .owner_service_share
+                      )}
+                    </Text>
+                  </View>
+
+
+                  <View
+                    style={{
+                      flex:
+                        1,
+
+                      minWidth:
+                        105,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          10,
+                      }}
+                    >
+                      TIPS
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.text,
+
+                        fontSize:
+                          13,
+
+                        fontWeight:
+                          '800',
+
+                        marginTop:
+                          3,
+                      }}
+                    >
+                      {money(
+                        person
+                          .tips_total
+                      )}
+                    </Text>
+                  </View>
+
+
+                  <View
+                    style={{
+                      flex:
+                        1,
+
+                      minWidth:
+                        105,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          10,
+                      }}
+                    >
+                      RETAIL
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.text,
+
+                        fontSize:
+                          13,
+
+                        fontWeight:
+                          '800',
+
+                        marginTop:
+                          3,
+                      }}
+                    >
+                      {money(
+                        person
+                          .sales_total
+                      )}
+                    </Text>
+                  </View>
+                </View>
+              </Card>
+            );
+          }
+        )}
+      </View>
+    );
+  };
+    /* =====================================================
+     HEADER CONTENT
+  ===================================================== */
+
+  const Header =
+    (
+      <View>
+        <View
+          style={{
+            marginBottom: 18,
+          }}
+        >
+          <Text
+            style={{
+              color:
+                COLORS.text,
+
+              fontSize:
+                isPhone
+                  ? 24
+                  : 28,
+
+              fontWeight: '800',
+            }}
+          >
+            Earnings
+          </Text>
+
+          <Text
+            style={{
+              color:
+                COLORS.textMuted,
+
+              fontSize: 13,
+
+              marginTop: 4,
+            }}
+          >
+            Revenue, staff performance and estimated tax reserves.
+          </Text>
+        </View>
+
+
+        <Card>
+          <Text
+            style={{
+              color:
+                COLORS.text,
+
+              fontSize: 14,
+
+              fontWeight: '800',
+
+              marginBottom: 10,
+            }}
+          >
+            Reporting Period
+          </Text>
+
+
+          <View
+            style={{
+              flexDirection: 'row',
+
+              flexWrap: 'wrap',
+
+              gap: 7,
+            }}
+          >
+            {presets.map(
+              (
+                preset
+              ) => (
+                <PresetButton
+                  key={
+                    preset.id
+                  }
+
+                  label={
+                    preset.label
+                  }
+
+                  active={
+                    activePreset ===
+                    preset.id
+                  }
+
+                  onPress={() =>
+                    onPresetPress(
+                      preset.id
+                    )
+                  }
+                />
+              )
+            )}
+          </View>
+
+
+          <View
+            style={{
+              height: 1,
+
+              backgroundColor:
+                COLORS.border,
+
+              marginVertical: 16,
+            }}
+          />
+
+
+          <Text
+            style={{
+              color:
+                COLORS.textSecondary,
+
+              fontSize: 12,
+
+              fontWeight: '800',
+
+              marginBottom: 9,
+            }}
+          >
+            Custom range
+          </Text>
+
+
+          <View
+            style={{
+              flexDirection:
+                isPhone
+                  ? 'column'
+                  : 'row',
+
+              gap:
+                isPhone
+                  ? 0
+                  : 10,
+            }}
+          >
+            <View
+              style={{
+                flex: 1,
+              }}
+            >
+              <FieldLabel>
+                Start Date
+              </FieldLabel>
+
+              <AppInput
+                value={
+                  mdyStart
+                }
+
+                onChangeText={
+                  setMdyStart
+                }
+
+                placeholder="MM/DD/YYYY"
+
+                keyboardType="numbers-and-punctuation"
+
+                style={{
+                  marginBottom: 9,
+                }}
+              />
+
+              <FieldLabel>
+                Start Time
+              </FieldLabel>
+
+              <AppInput
+                value={
+                  timeStart
+                }
+
+                onChangeText={
+                  setTimeStart
+                }
+
+                placeholder="12:00 AM"
+
+                style={{
+                  marginBottom:
+                    isPhone
+                      ? 13
+                      : 0,
+                }}
+              />
+            </View>
+
+
+            <View
+              style={{
+                flex: 1,
+              }}
+            >
+              <FieldLabel>
+                End Date
+              </FieldLabel>
+
+              <AppInput
+                value={
+                  mdyEnd
+                }
+
+                onChangeText={
+                  setMdyEnd
+                }
+
+                placeholder="MM/DD/YYYY"
+
+                keyboardType="numbers-and-punctuation"
+
+                style={{
+                  marginBottom: 9,
+                }}
+              />
+
+              <FieldLabel>
+                End Time
+              </FieldLabel>
+
+              <AppInput
+                value={
+                  timeEnd
+                }
+
+                onChangeText={
+                  setTimeEnd
+                }
+
+                placeholder="11:59 PM"
+              />
+            </View>
+          </View>
+
+
+          <TouchableOpacity
+            activeOpacity={0.85}
+
+            onPress={
+              applyDates
+            }
+
+            style={{
+              minHeight: 48,
+
+              borderRadius:
+                RADIUS.medium,
+
+              backgroundColor:
+                COLORS.royal,
+
+              alignItems:
+                'center',
+
+              justifyContent:
+                'center',
+
+              marginTop: 14,
+            }}
+          >
+            <Text
+              style={{
+                color:
+                  COLORS.white,
+
+                fontSize: 14,
+
+                fontWeight:
+                  '800',
+              }}
+            >
+              Apply Custom Range
+            </Text>
+          </TouchableOpacity>
+        </Card>
+
+
+        <View
+          style={{
+            marginTop:
+              18,
+
+            flexDirection:
+              'row',
+
+            flexWrap:
+              'wrap',
+
+            gap:
+              10,
+          }}
+        >
+          {isOwnerOrReception ? (
+            <>
+              <>
+  <MetricCard
+    title="Service Revenue"
+
+    value={
+      summary
+        .services_total
+    }
+
+    subtitle="Full amount charged for your services"
+  />
+
+  <MetricCard
+    title="My Service Earnings — 60%"
+
+    value={
+      summary
+        .staff_service_earnings
+    }
+
+    subtitle="Your share of service revenue"
+  />
+
+  <MetricCard
+    title="Salon Share — 40%"
+
+    value={
+      summary
+        .owner_service_share
+    }
+
+    subtitle="Amount retained by the salon"
+  />
+
+  <MetricCard
+    title="Tips"
+
+    value={
+      summary
+        .tips_total
+    }
+
+    subtitle="100% of your tips"
+  />
+
+  <MetricCard
+    title="Retail"
+
+    value={
+      summary
+        .sales_total
+    }
+
+    subtitle="Gross products linked to your appointments"
+  />
+</>
+            </>
+          ) : (
+            <>
+              <MetricCard
+                title="Service Revenue"
+
+                value={
+                  summary
+                    .services_total
+                }
+
+                subtitle="Services you performed"
+              />
+
+              <MetricCard
+                title="My Service Earnings"
+
+                value={
+                  summary
+                    .staff_service_earnings
+                }
+
+                subtitle="Your 60% service share"
+              />
+
+              <MetricCard
+                title="Tips"
+
+                value={
+                  summary
+                    .tips_total
+                }
+
+                subtitle="100% of your tips"
+              />
+
+              <MetricCard
+                title="Retail Sold"
+
+                value={
+                  summary
+                    .sales_total
+                }
+
+                subtitle="Gross products you sold"
+              />
+
+              <MetricCard
+                title="Product Commission — 20%"
+
+                value={
+                  summary
+                    .product_commission
+                }
+
+                subtitle="Your commission from product sales"
+              />
+            </>
+          )}
+        </View>
+
+
+        {isOwnerOrReception ? (
+          <MetricCard
+            title="TOTAL SALON REVENUE"
+
+            value={
+              summary
+                .grand_total
+            }
+
+            subtitle={`${fmtDateShort(
+              start
+            )} – ${fmtDateShort(
+              end
+            )}`}
+
+            emphasized
+
+            style={{
+              marginTop:
+                10,
+            }}
+          />
+        ) : (
+          <MetricCard
+            title="MY EARNINGS"
+
+            value={
+              Number(
+                summary
+                  .staff_service_earnings ||
+                0
+              ) +
+              Number(
+                summary
+                  .tips_total ||
+                0
+              ) +
+              Number(
+                summary
+                  .product_commission ||
+                0
+              )
+            }
+
+            subtitle={`${fmtDateShort(
+              start
+            )} – ${fmtDateShort(
+              end
+            )} • 60% services + 100% tips + 20% retail commission`}
+
+            emphasized
+
+            style={{
+              marginTop:
+                10,
+            }}
+          />
+        )}
+
+
+        <View
+          style={{
+            marginTop: 22,
+          }}
+        >
+          <SectionTitle
+            title="Revenue Mix"
+
+            subtitle="Services and tips grouped by specialty, plus retail sales."
+          />
+
+          <Card>
+            {revenueMix.length ===
+            0 ? (
+              <View
+                style={{
+                  paddingVertical:
+                    30,
+
+                  alignItems:
+                    'center',
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      COLORS.text,
+
+                    fontSize: 16,
+
+                    fontWeight:
+                      '800',
+                  }}
+                >
+                  No revenue yet
+                </Text>
+
+                <Text
+                  style={{
+                    color:
+                      COLORS.textMuted,
+
+                    fontSize: 12,
+
+                    marginTop: 5,
+                  }}
+                >
+                  There are no earnings in this range.
+                </Text>
+              </View>
+            ) : (
+              <>
+                <View
+                  style={{
+                    flexDirection:
+                      'row',
+
+                    alignItems:
+                      'flex-end',
+
+                    justifyContent:
+                      'space-between',
+
+                    marginBottom: 18,
+                  }}
+                >
+                  <View>
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize: 11,
+
+                        fontWeight:
+                          '700',
+                      }}
+                    >
+                      TOTAL
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.text,
+
+                        fontSize: 25,
+
+                        fontWeight:
+                          '900',
+
+                        marginTop: 3,
+                      }}
+                    >
+                      {money(
+                        summary.grand_total
+                      )}
+                    </Text>
+                  </View>
+
+                  <Text
+                    style={{
+                      color:
+                        COLORS.textMuted,
+
+                      fontSize: 11,
+                    }}
+                  >
+                    Selected period
+                  </Text>
+                </View>
+
+
+                {revenueMix.map(
+                  (
+                    item,
+                    index
+                  ) => (
+                    <RevenueBar
+                      key={
+                        item.key
+                      }
+
+                      index={
+                        index
+                      }
+
+                      label={
+                        item.label
+                      }
+
+                      value={
+                        item.value
+                      }
+
+                      total={
+                        summary.grand_total
+                      }
+                    />
+                  )
+                )}
+              </>
+            )}
+          </Card>
+        </View>
+
+
+        <TaxSection />
+
+        <StaffSection />
+
+
+        <View
+          style={{
+            marginTop: 22,
+
+            marginBottom: 12,
+          }}
+        >
+          <SectionTitle
+            title={
+              isOwnerOrReception
+                ? 'Appointments in Range'
+                : 'Your Appointments'
+            }
+
+            subtitle={
+              isOwnerOrReception
+                ? 'Appointments contributing to this report.'
+                : 'Appointments contributing to your earnings.'
+            }
+          />
+        </View>
+      </View>
+    );
+
+
+  /* =====================================================
+     APPOINTMENT ROW
+  ===================================================== */
+
+  const renderAppointment =
+    ({
+      item,
+    }) => (
+      <Card
+        style={{
+          marginBottom: 10,
+        }}
+      >
+        <View
+          style={{
+            flexDirection:
+              'row',
+
+            alignItems:
+              'flex-start',
+          }}
+        >
+          <View
+            style={{
+              width: 4,
+
+              alignSelf:
+                'stretch',
+
+              minHeight: 60,
+
+              backgroundColor:
+                COLORS.royal,
+
+              borderRadius: 99,
+
+              marginRight: 12,
+            }}
+          />
+
+          <View
+            style={{
+              flex: 1,
+            }}
+          >
+            <View
+              style={{
+                flexDirection:
+                  'row',
+
+                justifyContent:
+                  'space-between',
+
+                gap: 10,
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    COLORS.text,
+
+                  fontSize: 15,
+
+                  fontWeight:
+                    '800',
+
+                  flex: 1,
+                }}
+              >
+                {item.service_name}
+              </Text>
+
+              <Text
+                style={{
+                  color:
+                    COLORS.royal,
+
+                  fontSize: 14,
+
+                  fontWeight:
+                    '900',
+                }}
+              >
+                {money(
+                  item.price
+                )}
+              </Text>
+            </View>
+
+
+            <Text
+              style={{
+                color:
+                  COLORS.textSecondary,
+
+                fontSize: 12,
+
+                marginTop: 5,
+              }}
+            >
+              {fmtDateShort(
+                item.start_time
+              )}
+              {' • '}
+              {fmtTime12(
+                item.start_time
+              )}
+              {' – '}
+              {fmtTime12(
+                item.end_time
+              )}
+            </Text>
+
+
+            <Text
+              style={{
+                color:
+                  COLORS.textMuted,
+
+                fontSize: 11,
+
+                marginTop: 5,
+              }}
+            >
+              {getClientName(
+                item.client_id
+              )}
+              {' • '}
+              {getStaffName(
+                item.staff_id
+              )}
+            </Text>
+
+
+            {Number(
+              item.tip ||
+              0
+            ) > 0 && (
+              <Text
+                style={{
+                  color:
+                    COLORS.textMuted,
+
+                  fontSize: 11,
+
+                  marginTop: 3,
+                }}
+              >
+                Tip:{' '}
+                {money(
+                  item.tip
+                )}
+              </Text>
+            )}
+          </View>
+        </View>
+      </Card>
+    );
+
+
+  /* =====================================================
+     RENDER
+  ===================================================== */
+
+  return (
+    <View
+      style={{
+        flex: 1,
+
+        backgroundColor:
+          COLORS.background,
+      }}
+    >
+      <TouchableWithoutFeedback
+        onPress={
+          Keyboard.dismiss
+        }
+
+        accessible={
+          false
+        }
+      >
+        <FlatList
+          data={
+            appointments
+          }
+
+          keyExtractor={(
+            appointment
+          ) =>
+            String(
+              appointment.id
+            )
+          }
+
+          renderItem={
+            renderAppointment
+          }
+
+          ListHeaderComponent={
+            Header
+          }
+
+          ListEmptyComponent={
+            !loading ? (
+              <Card>
+                <Text
+                  style={{
+                    color:
+                      COLORS.text,
+
+                    fontSize: 15,
+
+                    fontWeight:
+                      '800',
+
+                    textAlign:
+                      'center',
+                  }}
+                >
+                  No appointments in this range
+                </Text>
+
+                <Text
+                  style={{
+                    color:
+                      COLORS.textMuted,
+
+                    fontSize: 12,
+
+                    textAlign:
+                      'center',
+
+                    marginTop: 5,
+                  }}
+                >
+                  Choose another reporting period to view earnings activity.
+                </Text>
+              </Card>
+            ) : null
+          }
+
+          refreshing={
+            loading
+          }
+
+          onRefresh={async () => {
+            try {
+              setLoading(
+                true
+              );
+
+              await loadAll(
+                start,
+                end
+              );
+            } catch (
+              error
+            ) {
+              Alert.alert(
+                'Refresh failed',
+                String(
+                  error.message ||
+                  error
+                )
+              );
+            } finally {
+              setLoading(
+                false
+              );
+            }
+          }}
+
+          contentContainerStyle={{
+            width: '100%',
+
+            maxWidth:
+              isDesktop
+                ? 1200
+                : 950,
+
+            alignSelf:
+              'center',
+
+            padding:
+              contentPadding,
+
+            paddingBottom:
+              40,
+          }}
+
+          keyboardDismissMode="on-drag"
+
+          keyboardShouldPersistTaps="handled"
+
+          showsVerticalScrollIndicator={
+            false
+          }
+        />
+      </TouchableWithoutFeedback>
+    </View>
+  );
+}

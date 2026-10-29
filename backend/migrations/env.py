@@ -12,12 +12,18 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-# Import your SQLAlchemy Base and models so Alembic sees the metadata
-from app.database import Base
+# Import your SQLAlchemy Base and the app's DB URL so Alembic matches the app
+from app.database import Base, DATABASE_URL as APP_DATABASE_URL  # <-- uses the same URL as your app
 import app.models  # register all models/relationships
 
 # Alembic Config
 config = context.config
+
+# Configure the URL:
+# Priority: $DATABASE_URL (if set) -> app.database.DATABASE_URL -> fallback from alembic.ini
+env_database_url = os.getenv("DATABASE_URL", APP_DATABASE_URL)
+if env_database_url:
+    config.set_main_option("sqlalchemy.url", env_database_url)
 
 # Logging
 if config.config_file_name is not None:

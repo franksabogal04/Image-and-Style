@@ -1,0 +1,5562 @@
+# backend/app/routers/payments.py
+
+import os
+from datetime import datetime
+
+import stripe
+import requests
+
+from dotenv import load_dotenv
+
+from pydantic import BaseModel, Field
+from typing import Optional, List
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+)
+
+from fastapi.responses import JSONResponse
+
+from sqlalchemy.orm import Session
+
+from ..database import get_db
+from .. import models, deps
+from ..email_service import (
+    send_booking_confirmation_email,
+)
+
+
+load_dotenv()
+
+
+router = APIRouter()
+
+
+# =========================================================
+# STRIPE CONFIG
+# =========================================================
+
+STRIPE_SECRET_KEY = os.getenv(
+    "STRIPE_SECRET_KEY",
+    "",
+)
+
+
+STRIPE_WEBHOOK_SECRET = os.getenv(
+    "STRIPE_WEBHOOK_SECRET",
+    "",
+)
+
+
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    "http://localhost:8081",
+)
+
+
+
+STRIPE_TERMINAL_READER_ID = os.getenv(
+    "STRIPE_TERMINAL_READER_ID",
+    "",
+)
+
+
+# True uses a normal simulated Terminal payment because
+# Stripe must approve the account before it accepts the
+# real process_config[moto] parameter.
+STRIPE_MOTO_SIMULATION = (
+    os.getenv(
+        "STRIPE_MOTO_SIMULATION",
+        "false",
+    )
+    .strip()
+    .lower()
+    in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+)
+
+
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
+
+    stripe.api_version = os.getenv(
+        "STRIPE_API_VERSION",
+        "2026-08-26.dahlia",
+    )
+
+
+
+# =========================================================
+# REFUND REQUEST
+# =========================================================
+
+class RefundRequest(BaseModel):
+    """
+    Select exactly what should be returned.
+
+    Examples:
+
+        Service only:
+            refund_service=True
+
+        One product:
+            sale_ids=[12]
+
+        Service + tip:
+            refund_service=True
+            refund_tip=True
+
+        Full visit:
+            refund_service=True
+            refund_tip=True
+            sale_ids=[all sale ids]
+    """
+
+    payment_id: Optional[int] = None
+
+    refund_service: bool = False
+
+    refund_tip: bool = False
+
+    sale_ids: List[int] = Field(
+        default_factory=list
+    )
+
+    reason: Optional[str] = None
+
+
+# =========================================================
+# STAFF CANCELLATION REQUEST
+# =========================================================
+
+class StaffCancelRequest(BaseModel):
+    refund_deposit: bool
+
+    reason: Optional[str] = None
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+def _get_appointment(
+    appointment_id: int,
+    db: Session,
+):
+    appointment = (
+        db.query(models.Appointment)
+        .filter(
+            models.Appointment.id
+            == appointment_id
+        )
+        .first()
+    )
+
+
+    if not appointment:
+        raise HTTPException(
+            status_code=404,
+            detail="Appointment not found.",
+        )
+
+
+    return appointment
+
+
+def _authorize_appointment(
+    appointment: models.Appointment,
+    current_user: models.User,
+):
+    """
+    Owner and receptionist may work with any appointment.
+
+    Staff may only work with appointments assigned
+    to themselves.
+    """
+
+    if current_user.role in (
+        "owner",
+        "receptionist",
+    ):
+        return
+
+
+    if (
+        current_user.role == "staff"
+        and appointment.staff_id
+        == current_user.id
+    ):
+        return
+
+
+    raise HTTPException(
+        status_code=403,
+        detail="Forbidden.",
+    )
+
+
+def _validate_tip(
+    tip_cents: int,
+):
+    if tip_cents < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Tip cannot be negative.",
+        )
+
+
+    # Development safety limit:
+    # $1,000 maximum tip.
+    if tip_cents > 100000:
+        raise HTTPException(
+            status_code=400,
+            detail="Tip amount is too large.",
+        )
+
+
+def _appointment_sales(
+    appointment_id: int,
+    db: Session,
+):
+    return (
+        db.query(models.Sale)
+        .filter(
+            models.Sale.appointment_id
+            == appointment_id
+        )
+        .order_by(
+            models.Sale.created_at.asc()
+        )
+        .all()
+    )
+
+
+def _paid_payments(
+    appointment_id: int,
+    db: Session,
+):
+    return (
+        db.query(models.Payment)
+        .filter(
+            models.Payment.appointment_id
+            == appointment_id,
+            models.Payment.status
+            == "paid",
+        )
+        .order_by(
+            models.Payment.created_at.asc()
+        )
+        .all()
+    )
+
+
+def _build_totals(
+    appointment: models.Appointment,
+    db: Session,
+    tip_cents: int = None,
+):
+    """
+    Central checkout calculation.
+
+    Never trust the frontend for:
+
+        service price
+        product price
+        taxes
+
+    Those values all come from our database.
+    """
+
+    sales = _appointment_sales(
+        appointment.id,
+        db,
+    )
+
+
+    service_subtotal = round(
+        float(
+            appointment.price
+            or 0.0
+        ),
+        2,
+    )
+
+
+    service_tax = round(
+        float(
+            appointment.service_tax_amount
+            or 0.0
+        ),
+        2,
+    )
+
+
+    product_subtotal = round(
+        sum(
+            float(
+                sale.total_price
+                or 0.0
+            )
+            for sale in sales
+        ),
+        2,
+    )
+
+
+    product_tax = round(
+        sum(
+            float(
+                sale.retail_tax_amount
+                or 0.0
+            )
+            for sale in sales
+        ),
+        2,
+    )
+
+
+    if tip_cents is None:
+        tip_amount = round(
+            float(
+                appointment.tip
+                or 0.0
+            ),
+            2,
+        )
+
+    else:
+        tip_amount = round(
+            tip_cents / 100.0,
+            2,
+        )
+
+
+    tip_tax_rate = float(
+        appointment.tip_tax_rate
+        or 0.0
+    )
+
+
+    tip_tax = round(
+        tip_amount
+        * tip_tax_rate,
+        2,
+    )
+
+
+    subtotal = round(
+        service_subtotal
+        + product_subtotal,
+        2,
+    )
+
+
+    tax_total = round(
+        service_tax
+        + product_tax
+        + tip_tax,
+        2,
+    )
+
+
+    grand_total = round(
+        subtotal
+        + tax_total
+        + tip_amount,
+        2,
+    )
+
+
+    product_lines = []
+
+
+    for sale in sales:
+        product = sale.product
+
+        product_lines.append(
+            {
+                "sale_id":
+                    sale.id,
+
+                "product_id":
+                    sale.product_id,
+
+                "name":
+                    (
+                        product.name
+                        if product
+                        else f"Product #{sale.product_id}"
+                    ),
+
+                "quantity":
+                    sale.quantity,
+
+                "subtotal":
+                    round(
+                        float(
+                            sale.total_price
+                            or 0.0
+                        ),
+                        2,
+                    ),
+
+                "tax":
+                    round(
+                        float(
+                            sale.retail_tax_amount
+                            or 0.0
+                        ),
+                        2,
+                    ),
+
+                "total":
+                    round(
+                        float(
+                            sale.total_with_tax
+                            if sale.total_with_tax
+                            is not None
+                            else sale.total_price
+                            or 0.0
+                        ),
+                        2,
+                    ),
+            }
+        )
+
+
+    return {
+        "service_subtotal":
+            service_subtotal,
+
+        "service_tax":
+            service_tax,
+
+        "product_subtotal":
+            product_subtotal,
+
+        "product_tax":
+            product_tax,
+
+        "tip":
+            tip_amount,
+
+        "tip_tax":
+            tip_tax,
+
+        "tip_tax_rate":
+            tip_tax_rate,
+
+        "subtotal":
+            subtotal,
+
+        "tax_total":
+            tax_total,
+
+        "grand_total":
+            grand_total,
+
+        "products":
+            product_lines,
+    }
+
+
+def _payment_status(
+    appointment_id: int,
+    total_due: float,
+    db: Session,
+):
+    payments = _paid_payments(
+        appointment_id,
+        db,
+    )
+
+
+    paid_total = round(
+        sum(
+            float(
+                payment.amount
+                or 0.0
+            )
+            for payment in payments
+        ),
+        2,
+    )
+
+
+    refunded_total = float(
+        db.query(
+            models.Refund
+        )
+        .with_entities(
+            __import__("sqlalchemy").func.coalesce(
+                __import__("sqlalchemy").func.sum(
+                    models.Refund.amount
+                ),
+                0.0,
+            )
+        )
+        .filter(
+            models.Refund.appointment_id
+            == appointment_id,
+            models.Refund.status
+            == "succeeded",
+        )
+        .scalar()
+        or 0.0
+    )
+
+    refunded_total = round(
+        refunded_total,
+        2,
+    )
+
+
+    net_paid = round(
+        max(
+            0.0,
+            paid_total
+            - refunded_total,
+        ),
+        2,
+    )
+
+
+    if paid_total <= 0:
+        status = "unpaid"
+
+    elif (
+        refunded_total > 0
+        and refunded_total + 0.005
+        >= paid_total
+    ):
+        status = "refunded"
+
+    elif refunded_total > 0:
+        status = "partially_refunded"
+
+    elif paid_total + 0.005 < total_due:
+        status = "partially_paid"
+
+    else:
+        status = "paid"
+
+
+    # A refund is intentional, so it should not make the
+    # appointment look like the client owes a new balance.
+    if status in (
+        "paid",
+        "partially_refunded",
+        "refunded",
+    ):
+        balance_due = 0.0
+
+    else:
+        balance_due = round(
+            max(
+                0.0,
+                total_due - paid_total,
+            ),
+            2,
+        )
+
+
+    return {
+        "status":
+            status,
+
+        "paid_total":
+            paid_total,
+
+        "refunded_total":
+            refunded_total,
+
+        "net_paid":
+            net_paid,
+
+        "balance_due":
+            balance_due,
+
+        "payments":
+            [
+                {
+                    "id":
+                        payment.id,
+
+                    "amount":
+                        round(
+                            float(
+                                payment.amount
+                                or 0.0
+                            ),
+                            2,
+                        ),
+
+                    "tip_amount":
+                        round(
+                            float(
+                                payment.tip_amount
+                                or 0.0
+                            ),
+                            2,
+                        ),
+
+                    "method":
+                        payment.method,
+
+                    "status":
+                        payment.status,
+
+                    "created_at":
+                        payment.created_at,
+
+                    "stripe_checkout_session_id":
+                        payment.stripe_checkout_session_id,
+
+                    "stripe_payment_intent_id":
+                        payment.stripe_payment_intent_id,
+                }
+                for payment in payments
+            ],
+    }
+
+
+def _update_appointment_tip(
+    appointment: models.Appointment,
+    tip_amount: float,
+):
+    """
+    Save the final tip on the appointment and refresh
+    the appointment tax snapshot.
+
+    Products have their own Sale tax snapshots.
+    """
+
+    appointment.tip = round(
+        float(tip_amount),
+        2,
+    )
+
+
+    tip_tax_rate = float(
+        appointment.tip_tax_rate
+        or 0.0
+    )
+
+
+    tip_tax = round(
+        appointment.tip
+        * tip_tax_rate,
+        2,
+    )
+
+
+    appointment.tip_tax_amount = (
+        tip_tax
+    )
+
+
+    service_tax = float(
+        appointment.service_tax_amount
+        or 0.0
+    )
+
+
+    appointment.total_with_tax = round(
+        float(
+            appointment.price
+            or 0.0
+        )
+        + appointment.tip
+        + service_tax
+        + tip_tax,
+        2,
+    )
+
+
+# =========================================================
+# APPOINTMENT CHECKOUT SUMMARY
+# =========================================================
+
+@router.get(
+    "/appointment/{appointment_id}/summary"
+)
+def appointment_payment_summary(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(
+        deps.get_current_user
+    ),
+):
+    appointment = _get_appointment(
+        appointment_id,
+        db,
+    )
+
+
+    _authorize_appointment(
+        appointment,
+        current_user,
+    )
+
+
+    totals = _build_totals(
+        appointment,
+        db,
+    )
+
+
+    payment = _payment_status(
+        appointment.id,
+        totals["grand_total"],
+        db,
+    )
+
+
+    # =====================================================
+    # REFUND AVAILABILITY / HISTORY
+    # =====================================================
+
+    successful_refunds = (
+        db.query(models.Refund)
+        .filter(
+            models.Refund.appointment_id
+            == appointment.id,
+            models.Refund.status
+            == "succeeded",
+        )
+        .order_by(
+            models.Refund.created_at.asc()
+        )
+        .all()
+    )
+
+
+    refund_ids = [
+        refund.id
+        for refund in successful_refunds
+    ]
+
+
+    refund_lines = []
+
+    if refund_ids:
+        refund_lines = (
+            db.query(models.RefundLine)
+            .filter(
+                models.RefundLine.refund_id.in_(
+                    refund_ids
+                )
+            )
+            .order_by(
+                models.RefundLine.created_at.asc()
+            )
+            .all()
+        )
+
+
+    refunded_service = any(
+        line.kind == "service"
+        for line in refund_lines
+    )
+
+
+    refunded_tip = any(
+        line.kind == "tip"
+        for line in refund_lines
+    )
+
+
+    refunded_sale_ids = [
+        line.sale_id
+        for line in refund_lines
+        if (
+            line.kind == "product"
+            and line.sale_id is not None
+        )
+    ]
+
+
+    refund_history = []
+
+    lines_by_refund = {}
+
+    for line in refund_lines:
+        lines_by_refund.setdefault(
+            line.refund_id,
+            [],
+        ).append(
+            {
+                "id":
+                    line.id,
+
+                "kind":
+                    line.kind,
+
+                "sale_id":
+                    line.sale_id,
+
+                "staff_id":
+                    line.staff_id,
+
+                "description":
+                    line.description,
+
+                "quantity":
+                    line.quantity,
+
+                "subtotal":
+                    round(
+                        float(
+                            line.subtotal
+                            or 0.0
+                        ),
+                        2,
+                    ),
+
+                "tax_amount":
+                    round(
+                        float(
+                            line.tax_amount
+                            or 0.0
+                        ),
+                        2,
+                    ),
+
+                "total":
+                    round(
+                        float(
+                            line.total
+                            or 0.0
+                        ),
+                        2,
+                    ),
+            }
+        )
+
+
+    for refund in successful_refunds:
+        refund_history.append(
+            {
+                "id":
+                    refund.id,
+
+                "payment_id":
+                    refund.payment_id,
+
+                "method":
+                    refund.method,
+
+                "status":
+                    refund.status,
+
+                "amount":
+                    round(
+                        float(
+                            refund.amount
+                            or 0.0
+                        ),
+                        2,
+                    ),
+
+                "reason":
+                    refund.reason,
+
+                "stripe_refund_id":
+                    refund.stripe_refund_id,
+
+                "created_at":
+                    refund.created_at,
+
+                "lines":
+                    lines_by_refund.get(
+                        refund.id,
+                        [],
+                    ),
+            }
+        )
+
+
+    return {
+        "appointment_id":
+            appointment.id,
+
+        "service_name":
+            appointment.service_name,
+
+        "staff_id":
+            appointment.staff_id,
+
+        "client_id":
+            appointment.client_id,
+
+        **totals,
+
+        "payment_status":
+            payment["status"],
+
+        "paid_total":
+            payment["paid_total"],
+
+        "refunded_total":
+            payment["refunded_total"],
+
+        "net_paid":
+            payment["net_paid"],
+
+        "balance_due":
+            payment["balance_due"],
+
+        "payments":
+            payment["payments"],
+
+        "refunded_total":
+            payment["refunded_total"],
+
+        "net_paid":
+            payment["net_paid"],
+
+        "refunded_service":
+            refunded_service,
+
+        "refunded_tip":
+            refunded_tip,
+
+        "refunded_sale_ids":
+            refunded_sale_ids,
+
+        "refunds":
+            refund_history,
+    }
+
+
+# =========================================================
+# PUBLIC ONLINE BOOKING DEPOSIT CHECKOUT
+# =========================================================
+
+@router.post(
+    "/public-deposit-checkout"
+)
+def create_public_deposit_checkout(
+    appointment_id: int,
+    booking_token: str,
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Public Stripe Checkout for an online-booking deposit.
+
+    No staff login is required.
+
+    Access is protected by the random booking_token that
+    belongs to the appointment.
+    """
+
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Stripe is not configured "
+                "(missing STRIPE_SECRET_KEY)."
+            ),
+        )
+
+
+    appointment = (
+        db.query(models.Appointment)
+        .filter(
+            models.Appointment.id
+            == appointment_id
+        )
+        .first()
+    )
+
+
+    if not appointment:
+        raise HTTPException(
+            status_code=404,
+            detail="Appointment not found.",
+        )
+
+
+    # -----------------------------------------------------
+    # VERIFY PUBLIC BOOKING TOKEN
+    # -----------------------------------------------------
+
+    if (
+        not appointment.booking_token
+        or not booking_token
+        or appointment.booking_token
+        != booking_token
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid booking token.",
+        )
+
+
+    # -----------------------------------------------------
+    # VERIFY THIS IS AN ONLINE DEPOSIT BOOKING
+    # -----------------------------------------------------
+
+    if appointment.booking_source != "online":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This appointment is not an "
+                "online booking."
+            ),
+        )
+
+
+    if not appointment.deposit_required:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This booking does not require "
+                "a deposit."
+            ),
+        )
+
+
+    # -----------------------------------------------------
+    # ALREADY CONFIRMED?
+    # -----------------------------------------------------
+
+    if appointment.booking_status == "confirmed":
+
+        paid_payment = (
+            db.query(models.Payment)
+            .filter(
+                models.Payment.appointment_id
+                == appointment.id,
+                models.Payment.status
+                == "paid",
+            )
+            .first()
+        )
+
+        if paid_payment:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This booking deposit has "
+                    "already been paid."
+                ),
+            )
+
+
+    if appointment.booking_status != "pending_deposit":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This booking is no longer "
+                "waiting for a deposit."
+            ),
+        )
+
+
+    # -----------------------------------------------------
+    # VERIFY HOLD HAS NOT EXPIRED
+    # -----------------------------------------------------
+
+    if (
+        appointment.deposit_expires_at
+        and datetime.now()
+        >= appointment.deposit_expires_at
+    ):
+
+        appointment.booking_status = (
+            "cancelled"
+        )
+
+        appointment.deposit_expires_at = (
+            None
+        )
+
+        db.commit()
+
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "This booking hold expired. "
+                "Please choose the appointment "
+                "time again."
+            ),
+        )
+
+
+    # -----------------------------------------------------
+    # DEPOSIT AMOUNT
+    # -----------------------------------------------------
+
+    deposit_amount = round(
+        float(
+            appointment.deposit_amount
+            or 0.0
+        ),
+        2,
+    )
+
+
+    deposit_cents = int(
+        round(
+            deposit_amount * 100
+        )
+    )
+
+
+    if deposit_cents <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This appointment has an invalid "
+                "deposit amount."
+            ),
+        )
+
+
+    # -----------------------------------------------------
+    # PREVENT A SECOND ACTIVE DEPOSIT SESSION
+    # -----------------------------------------------------
+
+    pending_payment = (
+        db.query(models.Payment)
+        .filter(
+            models.Payment.appointment_id
+            == appointment.id,
+            models.Payment.status
+            == "pending",
+        )
+        .first()
+    )
+
+
+    if pending_payment:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A deposit checkout is already "
+                "in progress for this booking."
+            ),
+        )
+
+
+    # -----------------------------------------------------
+    # CREATE PAYMENT RECORD
+    # -----------------------------------------------------
+
+    payment = models.Payment(
+        appointment_id=
+            appointment.id,
+
+        amount=
+            deposit_amount,
+
+        tip_amount=
+            0.0,
+
+        method=
+            "card",
+
+        status=
+            "pending",
+    )
+
+
+    db.add(payment)
+    db.commit()
+    db.refresh(payment)
+
+
+    # -----------------------------------------------------
+    # RETURN URL
+    # -----------------------------------------------------
+
+    origin = None
+
+
+    if request:
+        origin = request.headers.get(
+            "origin"
+        )
+
+
+    if (
+        not origin
+        or ":8000" in origin
+    ):
+        origin = FRONTEND_URL
+
+
+    success_url = (
+        f"{origin}"
+        f"?deposit_payment=success"
+        f"&appointment_id={appointment.id}"
+        f"&payment_id={payment.id}"
+        f"&booking_token={booking_token}"
+        f"&session_id={{CHECKOUT_SESSION_ID}}"
+    )
+
+
+    cancel_url = (
+        f"{origin}"
+        f"?deposit_payment=cancelled"
+        f"&appointment_id={appointment.id}"
+        f"&payment_id={payment.id}"
+        f"&booking_token={booking_token}"
+    )
+
+
+    # -----------------------------------------------------
+    # CREATE STRIPE SESSION
+    # -----------------------------------------------------
+
+    try:
+
+        session = (
+            stripe.checkout.Session.create(
+                mode=
+                    "payment",
+
+                success_url=
+                    success_url,
+
+                cancel_url=
+                    cancel_url,
+
+                line_items=[
+                    {
+                        "price_data": {
+                            "currency":
+                                "usd",
+
+                            "product_data": {
+                                "name": (
+                                    "Booking Deposit — "
+                                    + (
+                                        appointment.service_name
+                                        or "Salon Service"
+                                    )
+                                ),
+                            },
+
+                            "unit_amount":
+                                deposit_cents,
+                        },
+
+                        "quantity":
+                            1,
+                    }
+                ],
+
+                client_reference_id=
+                    str(
+                        appointment.id
+                    ),
+
+                metadata={
+                    "appointment_id":
+                        str(
+                            appointment.id
+                        ),
+
+                    "staff_id":
+                        str(
+                            appointment.staff_id
+                        ),
+
+                    "payment_id":
+                        str(
+                            payment.id
+                        ),
+
+                    "payment_kind":
+                        "deposit",
+
+                    "tip_cents":
+                        "0",
+                },
+
+                payment_intent_data={
+                    "metadata": {
+                        "appointment_id":
+                            str(
+                                appointment.id
+                            ),
+
+                        "staff_id":
+                            str(
+                                appointment.staff_id
+                            ),
+
+                        "payment_id":
+                            str(
+                                payment.id
+                            ),
+
+                        "payment_kind":
+                            "deposit",
+
+                        "tip_cents":
+                            "0",
+                    }
+                },
+
+                automatic_tax={
+                    "enabled":
+                        False
+                },
+            )
+        )
+
+
+        payment.stripe_checkout_session_id = (
+            session.id
+        )
+
+        db.commit()
+
+
+        return {
+            "id":
+                session.id,
+
+            "url":
+                session.url,
+
+            "payment_id":
+                payment.id,
+
+            "appointment_id":
+                appointment.id,
+
+            "booking_status":
+                appointment.booking_status,
+
+            "deposit_amount":
+                deposit_amount,
+
+            "deposit_expires_at":
+                (
+                    appointment
+                    .deposit_expires_at
+                    .isoformat()
+                    if appointment.deposit_expires_at
+                    else None
+                ),
+        }
+
+
+    except stripe.error.StripeError as e:
+
+        payment.status = (
+            "cancelled"
+        )
+
+        db.commit()
+
+
+        message = (
+            getattr(
+                e,
+                "user_message",
+                None,
+            )
+            or str(e)
+        )
+
+
+        raise HTTPException(
+            status_code=400,
+            detail=message,
+        )
+
+
+    except Exception as e:
+
+        payment.status = (
+            "cancelled"
+        )
+
+        db.commit()
+
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Deposit checkout error: "
+                f"{str(e)}"
+            ),
+        )
+
+
+
+# =========================================================
+# CREATE STRIPE CARD CHECKOUT SESSION
+# =========================================================
+
+@router.post(
+    "/checkout-session"
+)
+def create_checkout_session(
+    appointment_id: int,
+    tip_cents: int = 0,
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(
+        deps.get_current_user
+    ),
+):
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Stripe is not configured "
+                "(missing STRIPE_SECRET_KEY)."
+            ),
+        )
+
+
+    _validate_tip(
+        tip_cents
+    )
+
+
+    appointment = _get_appointment(
+        appointment_id,
+        db,
+    )
+
+
+    _authorize_appointment(
+        appointment,
+        current_user,
+    )
+
+
+    totals = _build_totals(
+        appointment,
+        db,
+        tip_cents,
+    )
+
+
+    existing_payment = _payment_status(
+        appointment.id,
+        totals["grand_total"],
+        db,
+    )
+
+
+    amount_due_now = round(
+        max(
+            0.0,
+            totals["grand_total"]
+            - existing_payment["paid_total"],
+        ),
+        2,
+    )
+
+
+    if amount_due_now <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This appointment is already "
+                "fully paid."
+            ),
+        )
+
+
+    # =====================================================
+    # STRIPE LINE ITEMS
+    # =====================================================
+
+    amount_due_cents = int(
+        round(
+            amount_due_now
+            * 100
+        )
+    )
+
+
+    if amount_due_cents <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "There is nothing left to charge "
+                "for this appointment."
+            ),
+        )
+
+
+    line_items = [
+        {
+            "price_data": {
+                "currency":
+                    "usd",
+
+                "product_data": {
+                    "name":
+                        (
+                            "Remaining Balance — "
+                            + (
+                                appointment.service_name
+                                or "Salon Appointment"
+                            )
+                        ),
+                },
+
+                "unit_amount":
+                    amount_due_cents,
+            },
+
+            "quantity":
+                1,
+        }
+    ]
+
+
+    # =====================================================
+    # RETURN URL
+    # =====================================================
+
+    origin = None
+
+
+    if request:
+        origin = request.headers.get(
+            "origin"
+        )
+
+
+    # Swagger requests come from port 8000.
+    # That is the backend, not the actual frontend.
+    if (
+        not origin
+        or ":8000" in origin
+    ):
+        origin = FRONTEND_URL
+
+
+    # =====================================================
+    # CREATE PENDING PAYMENT RECORD FIRST
+    # =====================================================
+
+    payment = models.Payment(
+        appointment_id=
+            appointment.id,
+
+        amount=
+            amount_due_now,
+
+        tip_amount=
+            totals["tip"],
+
+        method=
+            "card",
+
+        status=
+            "pending",
+    )
+
+
+    db.add(payment)
+    db.commit()
+    db.refresh(payment)
+
+
+    success_url = (
+        f"{origin}"
+        f"?stripe_payment=success"
+        f"&appointment_id={appointment.id}"
+        f"&payment_id={payment.id}"
+        f"&session_id={{CHECKOUT_SESSION_ID}}"
+    )
+
+
+    cancel_url = (
+        f"{origin}"
+        f"?stripe_payment=cancelled"
+        f"&appointment_id={appointment.id}"
+        f"&payment_id={payment.id}"
+    )
+
+
+    try:
+        session = (
+            stripe.checkout.Session.create(
+                mode=
+                    "payment",
+
+                success_url=
+                    success_url,
+
+                cancel_url=
+                    cancel_url,
+
+                line_items=
+                    line_items,
+
+                client_reference_id=
+                    str(
+                        appointment.id
+                    ),
+
+                metadata={
+                    "appointment_id":
+                        str(
+                            appointment.id
+                        ),
+
+                    "staff_id":
+                        str(
+                            appointment.staff_id
+                        ),
+
+                    "payment_id":
+                        str(
+                            payment.id
+                        ),
+
+                    "tip_cents":
+                        str(
+                            tip_cents
+                        ),
+                },
+
+                payment_intent_data={
+                    "metadata": {
+                        "appointment_id":
+                            str(
+                                appointment.id
+                            ),
+
+                        "staff_id":
+                            str(
+                                appointment.staff_id
+                            ),
+
+                        "payment_id":
+                            str(
+                                payment.id
+                            ),
+
+                        "tip_cents":
+                            str(
+                                tip_cents
+                            ),
+                    }
+                },
+
+                automatic_tax={
+                    "enabled":
+                        False
+                },
+            )
+        )
+
+
+        payment.stripe_checkout_session_id = (
+            session.id
+        )
+
+
+        db.commit()
+
+
+        return {
+            "id":
+                session.id,
+
+            "url":
+                session.url,
+
+            "payment_id":
+                payment.id,
+
+            "appointment_id":
+                appointment.id,
+
+            "paid_before":
+                existing_payment["paid_total"],
+
+            "amount_due_now":
+                amount_due_now,
+
+            **totals,
+        }
+
+
+    except stripe.error.StripeError as e:
+
+        payment.status = (
+            "cancelled"
+        )
+
+        db.commit()
+
+
+        message = (
+            getattr(
+                e,
+                "user_message",
+                None,
+            )
+            or str(e)
+        )
+
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Stripe error: "
+                f"{message}"
+            ),
+        )
+
+
+    except Exception as e:
+
+        payment.status = (
+            "cancelled"
+        )
+
+        db.commit()
+
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Checkout error: "
+                f"{str(e)}"
+            ),
+        )
+
+
+# =========================================================
+# CASH PAYMENT
+# =========================================================
+
+@router.post(
+    "/cash"
+)
+def record_cash_payment(
+    appointment_id: int,
+    tip_cents: int = 0,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(
+        deps.get_current_user
+    ),
+):
+    _validate_tip(
+        tip_cents
+    )
+
+
+    appointment = _get_appointment(
+        appointment_id,
+        db,
+    )
+
+
+    _authorize_appointment(
+        appointment,
+        current_user,
+    )
+
+
+    totals = _build_totals(
+        appointment,
+        db,
+        tip_cents,
+    )
+
+
+    existing_payment = _payment_status(
+        appointment.id,
+        totals["grand_total"],
+        db,
+    )
+
+
+    amount_due_now = round(
+        max(
+            0.0,
+            totals["grand_total"]
+            - existing_payment["paid_total"],
+        ),
+        2,
+    )
+
+
+    if amount_due_now <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This appointment is already "
+                "fully paid."
+            ),
+        )
+
+
+    payment = models.Payment(
+        appointment_id=
+            appointment.id,
+
+        amount=
+            amount_due_now,
+
+        tip_amount=
+            totals["tip"],
+
+        method=
+            "cash",
+
+        status=
+            "paid",
+    )
+
+
+    _update_appointment_tip(
+        appointment,
+        totals["tip"],
+    )
+
+
+    db.add(payment)
+
+    db.commit()
+
+    db.refresh(payment)
+    db.refresh(appointment)
+
+
+    return {
+        "ok":
+            True,
+
+        "payment_id":
+            payment.id,
+
+        "appointment_id":
+            appointment.id,
+
+        "method":
+            "cash",
+
+        "payment_status":
+            "paid",
+
+        "amount_paid_now":
+            amount_due_now,
+
+        "previously_paid":
+            existing_payment["paid_total"],
+
+        **totals,
+    }
+
+
+
+# =========================================================
+# REFUND / VOID
+# =========================================================
+
+@router.post(
+    "/appointment/{appointment_id}/refund"
+)
+def refund_appointment_payment(
+    appointment_id: int,
+    payload: RefundRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(
+        deps.get_current_user
+    ),
+):
+    """
+    Refund selected parts of a completed appointment.
+
+    Owner/receptionist only.
+
+    Supported:
+        - service
+        - individual product sale rows
+        - tip
+        - any combination
+        - full visit by selecting everything
+
+    Card refunds are sent to Stripe.
+
+    Cash refunds are recorded internally.
+
+    Original Payment records remain untouched so
+    accounting history is preserved.
+    """
+
+    # -----------------------------------------------------
+    # PERMISSIONS
+    # -----------------------------------------------------
+
+    if current_user.role not in (
+        "owner",
+        "receptionist",
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only the owner or receptionist "
+                "can issue refunds."
+            ),
+        )
+
+
+    appointment = _get_appointment(
+        appointment_id,
+        db,
+    )
+
+
+    # -----------------------------------------------------
+    # FIND ORIGINAL PAYMENTS
+    # -----------------------------------------------------
+
+    payments = (
+        db.query(models.Payment)
+        .filter(
+            models.Payment.appointment_id
+            == appointment.id,
+            models.Payment.status
+            == "paid",
+        )
+        .order_by(
+            models.Payment.created_at.desc()
+        )
+        .all()
+    )
+
+
+    if not payments:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No completed payment was found "
+                "for this appointment."
+            ),
+        )
+
+
+    # Use the payment selected in the UI first, then
+    # automatically spill any remaining refund amount
+    # into the appointment's other paid transactions.
+    if payload.payment_id is not None:
+        selected_payment = next(
+            (
+                item
+                for item in payments
+                if item.id
+                == payload.payment_id
+            ),
+            None,
+        )
+
+        if not selected_payment:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "The selected payment was not found "
+                    "for this appointment."
+                ),
+            )
+
+        payments = [
+            selected_payment,
+            *[
+                item
+                for item in payments
+                if item.id
+                != selected_payment.id
+            ],
+        ]
+
+
+    # Kept for the existing service/tip line-building
+    # logic below. The actual refund may span several
+    # payment records.
+    payment = payments[0]
+
+
+    # -----------------------------------------------------
+    # MUST SELECT SOMETHING
+    # -----------------------------------------------------
+
+    requested_sale_ids = list(
+        dict.fromkeys(
+            payload.sale_ids
+            or []
+        )
+    )
+
+
+    if (
+        not payload.refund_service
+        and not payload.refund_tip
+        and not requested_sale_ids
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Select a service, product, "
+                "or tip to refund."
+            ),
+        )
+
+
+    # -----------------------------------------------------
+    # EXISTING SUCCESSFUL REFUNDS
+    # -----------------------------------------------------
+
+    previous_refunds = (
+        db.query(models.Refund)
+        .filter(
+            models.Refund.appointment_id
+            == appointment.id,
+            models.Refund.status
+            == "succeeded",
+        )
+        .all()
+    )
+
+
+    previous_refund_ids = [
+        refund.id
+        for refund in previous_refunds
+    ]
+
+
+    previous_lines = []
+
+    if previous_refund_ids:
+        previous_lines = (
+            db.query(models.RefundLine)
+            .filter(
+                models.RefundLine.refund_id.in_(
+                    previous_refund_ids
+                )
+            )
+            .all()
+        )
+
+
+    already_refunded_service = any(
+        line.kind == "service"
+        for line in previous_lines
+    )
+
+
+    already_refunded_tip = any(
+        line.kind == "tip"
+        for line in previous_lines
+    )
+
+
+    already_refunded_sale_ids = {
+        line.sale_id
+        for line in previous_lines
+        if (
+            line.kind == "product"
+            and line.sale_id is not None
+        )
+    }
+
+
+    # -----------------------------------------------------
+    # BUILD REFUND LINES
+    # -----------------------------------------------------
+
+    refund_lines = []
+
+
+    # SERVICE
+    if payload.refund_service:
+
+        if already_refunded_service:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The service has already "
+                    "been refunded."
+                ),
+            )
+
+
+        service_subtotal = round(
+            float(
+                appointment.price
+                or 0.0
+            ),
+            2,
+        )
+
+
+        service_tax = round(
+            float(
+                appointment.service_tax_amount
+                or 0.0
+            ),
+            2,
+        )
+
+
+        service_total = round(
+            service_subtotal
+            + service_tax,
+            2,
+        )
+
+
+        if service_total <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This appointment has no "
+                    "refundable service amount."
+                ),
+            )
+
+
+        refund_lines.append({
+            "kind":
+                "service",
+
+            "sale_id":
+                None,
+
+            "staff_id":
+                appointment.staff_id,
+
+            "description":
+                appointment.service_name
+                or "Service",
+
+            "quantity":
+                1,
+
+            "subtotal":
+                service_subtotal,
+
+            "tax_amount":
+                service_tax,
+
+            "total":
+                service_total,
+        })
+
+
+    # PRODUCTS
+    if requested_sale_ids:
+
+        sales = (
+            db.query(models.Sale)
+            .filter(
+                models.Sale.appointment_id
+                == appointment.id,
+                models.Sale.id.in_(
+                    requested_sale_ids
+                ),
+            )
+            .all()
+        )
+
+
+        found_ids = {
+            sale.id
+            for sale in sales
+        }
+
+
+        missing_ids = [
+            sale_id
+            for sale_id
+            in requested_sale_ids
+            if sale_id not in found_ids
+        ]
+
+
+        if missing_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "One or more selected products "
+                    "do not belong to this appointment."
+                ),
+            )
+
+
+        duplicate_ids = [
+            sale_id
+            for sale_id
+            in requested_sale_ids
+            if sale_id
+            in already_refunded_sale_ids
+        ]
+
+
+        if duplicate_ids:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "One or more selected products "
+                    "have already been refunded."
+                ),
+            )
+
+
+        for sale in sales:
+
+            product = sale.product
+
+
+            subtotal = round(
+                float(
+                    sale.total_price
+                    or 0.0
+                ),
+                2,
+            )
+
+
+            tax_amount = round(
+                float(
+                    sale.retail_tax_amount
+                    or 0.0
+                ),
+                2,
+            )
+
+
+            total = round(
+                subtotal
+                + tax_amount,
+                2,
+            )
+
+
+            if total <= 0:
+                continue
+
+
+            refund_lines.append({
+                "kind":
+                    "product",
+
+                "sale_id":
+                    sale.id,
+
+                "staff_id":
+                    sale.staff_id,
+
+                "description":
+                    (
+                        product.name
+                        if product
+                        else (
+                            f"Product #{sale.product_id}"
+                        )
+                    ),
+
+                "quantity":
+                    int(
+                        sale.quantity
+                        or 1
+                    ),
+
+                "subtotal":
+                    subtotal,
+
+                "tax_amount":
+                    tax_amount,
+
+                "total":
+                    total,
+            })
+
+
+    # TIP
+    if payload.refund_tip:
+
+        if already_refunded_tip:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The tip has already "
+                    "been refunded."
+                ),
+            )
+
+
+        tip_subtotal = round(
+            float(
+                payment.tip_amount
+                or appointment.tip
+                or 0.0
+            ),
+            2,
+        )
+
+
+        tip_tax = round(
+            float(
+                appointment.tip_tax_amount
+                or 0.0
+            ),
+            2,
+        )
+
+
+        tip_total = round(
+            tip_subtotal
+            + tip_tax,
+            2,
+        )
+
+
+        if tip_total <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This payment has no "
+                    "refundable tip."
+                ),
+            )
+
+
+        refund_lines.append({
+            "kind":
+                "tip",
+
+            "sale_id":
+                None,
+
+            "staff_id":
+                appointment.staff_id,
+
+            "description":
+                "Tip",
+
+            "quantity":
+                1,
+
+            "subtotal":
+                tip_subtotal,
+
+            "tax_amount":
+                tip_tax,
+
+            "total":
+                tip_total,
+        })
+
+
+    if not refund_lines:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The selected items have no "
+                "refundable amount."
+            ),
+        )
+
+
+    # -----------------------------------------------------
+    # REFUND TOTAL
+    # -----------------------------------------------------
+
+    refund_total = round(
+        sum(
+            float(
+                line["total"]
+                or 0.0
+            )
+            for line in refund_lines
+        ),
+        2,
+    )
+
+
+    if refund_total <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Refund amount must be greater "
+                "than zero."
+            ),
+        )
+
+
+    # Successful amounts already returned from each
+    # original payment.
+    refunded_by_payment = {}
+
+    for previous_refund in previous_refunds:
+        refunded_by_payment[
+            previous_refund.payment_id
+        ] = round(
+            refunded_by_payment.get(
+                previous_refund.payment_id,
+                0.0,
+            )
+            + float(
+                previous_refund.amount
+                or 0.0
+            ),
+            2,
+        )
+
+
+    payment_capacities = []
+
+    for original_payment in payments:
+        payment_amount = round(
+            float(
+                original_payment.amount
+                or 0.0
+            ),
+            2,
+        )
+
+        already_returned = round(
+            float(
+                refunded_by_payment.get(
+                    original_payment.id,
+                    0.0,
+                )
+            ),
+            2,
+        )
+
+        available = round(
+            max(
+                0.0,
+                payment_amount
+                - already_returned,
+            ),
+            2,
+        )
+
+        if available > 0:
+            payment_capacities.append(
+                (
+                    original_payment,
+                    available,
+                )
+            )
+
+
+    remaining_refundable = round(
+        sum(
+            available
+            for (
+                original_payment,
+                available
+            )
+            in payment_capacities
+        ),
+        2,
+    )
+
+
+    if (
+        refund_total
+        > remaining_refundable + 0.005
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Refund amount exceeds the total "
+                "remaining refundable payments."
+            ),
+        )
+
+
+    # -----------------------------------------------------
+    # ALLOCATE ACROSS ORIGINAL PAYMENTS
+    # -----------------------------------------------------
+
+    allocations = []
+
+    amount_left = refund_total
+
+    for (
+        original_payment,
+        available,
+    ) in payment_capacities:
+        if amount_left <= 0.005:
+            break
+
+        allocation_amount = round(
+            min(
+                available,
+                amount_left,
+            ),
+            2,
+        )
+
+        if allocation_amount <= 0:
+            continue
+
+        allocations.append(
+            (
+                original_payment,
+                allocation_amount,
+            )
+        )
+
+        amount_left = round(
+            amount_left
+            - allocation_amount,
+            2,
+        )
+
+
+    if amount_left > 0.005:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The refund could not be allocated "
+                "across the original payments."
+            ),
+        )
+
+
+    # Validate every transaction before any external
+    # Stripe refund is submitted.
+    for (
+        original_payment,
+        allocation_amount,
+    ) in allocations:
+        if original_payment.method not in (
+            "card",
+            "cash",
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unsupported payment method: "
+                    f"{original_payment.method}"
+                ),
+            )
+
+        if original_payment.method == "card":
+            if not STRIPE_SECRET_KEY:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "Stripe is not configured "
+                        "(missing STRIPE_SECRET_KEY)."
+                    ),
+                )
+
+            if (
+                not original_payment
+                .stripe_payment_intent_id
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "One of the card payments does "
+                        "not have a Stripe PaymentIntent ID."
+                    ),
+                )
+
+
+    reason = (
+        payload.reason.strip()
+        if (
+            payload.reason
+            and payload.reason.strip()
+        )
+        else None
+    )
+
+
+    refund_records = []
+
+
+    for (
+        original_payment,
+        allocation_amount,
+    ) in allocations:
+        refund_record = models.Refund(
+            appointment_id=
+                appointment.id,
+
+            payment_id=
+                original_payment.id,
+
+            method=
+                original_payment.method,
+
+            status=
+                "pending",
+
+            amount=
+                allocation_amount,
+
+            reason=
+                reason,
+        )
+
+        db.add(
+            refund_record
+        )
+
+        db.flush()
+
+        refund_records.append(
+            (
+                original_payment,
+                allocation_amount,
+                refund_record,
+            )
+        )
+
+
+    # Split accounting lines proportionally between
+    # refund transactions. Across all records, the
+    # original service/product/tip totals remain exact.
+    for line_data in refund_lines:
+        remaining_subtotal = round(
+            float(
+                line_data["subtotal"]
+                or 0.0
+            ),
+            2,
+        )
+
+        remaining_tax = round(
+            float(
+                line_data["tax_amount"]
+                or 0.0
+            ),
+            2,
+        )
+
+        remaining_line_total = round(
+            float(
+                line_data["total"]
+                or 0.0
+            ),
+            2,
+        )
+
+
+        for index, (
+            original_payment,
+            allocation_amount,
+            refund_record,
+        ) in enumerate(
+            refund_records
+        ):
+            is_last = (
+                index
+                == len(
+                    refund_records
+                ) - 1
+            )
+
+            if is_last:
+                line_subtotal = (
+                    remaining_subtotal
+                )
+
+                line_tax = (
+                    remaining_tax
+                )
+
+                line_total = (
+                    remaining_line_total
+                )
+
+            else:
+                ratio = (
+                    allocation_amount
+                    / refund_total
+                )
+
+                line_subtotal = round(
+                    float(
+                        line_data["subtotal"]
+                        or 0.0
+                    )
+                    * ratio,
+                    2,
+                )
+
+                line_tax = round(
+                    float(
+                        line_data["tax_amount"]
+                        or 0.0
+                    )
+                    * ratio,
+                    2,
+                )
+
+                line_total = round(
+                    float(
+                        line_data["total"]
+                        or 0.0
+                    )
+                    * ratio,
+                    2,
+                )
+
+
+            remaining_subtotal = round(
+                remaining_subtotal
+                - line_subtotal,
+                2,
+            )
+
+            remaining_tax = round(
+                remaining_tax
+                - line_tax,
+                2,
+            )
+
+            remaining_line_total = round(
+                remaining_line_total
+                - line_total,
+                2,
+            )
+
+
+            db.add(
+                models.RefundLine(
+                    refund_id=
+                        refund_record.id,
+
+                    kind=
+                        line_data["kind"],
+
+                    sale_id=
+                        line_data["sale_id"],
+
+                    staff_id=
+                        line_data["staff_id"],
+
+                    description=
+                        line_data["description"],
+
+                    quantity=
+                        (
+                            line_data["quantity"]
+                            if index == 0
+                            else None
+                        ),
+
+                    subtotal=
+                        line_subtotal,
+
+                    tax_amount=
+                        line_tax,
+
+                    total=
+                        line_total,
+                )
+            )
+
+
+    # Save the pending audit records before contacting
+    # Stripe, so every attempted external refund remains
+    # traceable.
+    db.commit()
+
+
+    # -----------------------------------------------------
+    # PROCESS EACH CARD/CASH ALLOCATION
+    # -----------------------------------------------------
+
+    for (
+        original_payment,
+        allocation_amount,
+        refund_record,
+    ) in refund_records:
+        try:
+            if (
+                original_payment.method
+                == "card"
+            ):
+                stripe_refund = (
+                    stripe.Refund.create(
+                        payment_intent=
+                            original_payment
+                            .stripe_payment_intent_id,
+
+                        amount=
+                            int(
+                                round(
+                                    allocation_amount
+                                    * 100
+                                )
+                            ),
+
+                        metadata={
+                            "appointment_id":
+                                str(
+                                    appointment.id
+                                ),
+
+                            "payment_id":
+                                str(
+                                    original_payment.id
+                                ),
+
+                            "refund_id":
+                                str(
+                                    refund_record.id
+                                ),
+                        },
+                    )
+                )
+
+
+                stripe_status = (
+                    stripe_refund.get(
+                        "status"
+                    )
+                    or "succeeded"
+                )
+
+
+                if stripe_status not in (
+                    "succeeded",
+                    "pending",
+                ):
+                    refund_record.status = (
+                        "failed"
+                    )
+
+                    db.commit()
+
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            "Stripe did not complete "
+                            "one of the refunds."
+                        ),
+                    )
+
+
+                refund_record.stripe_refund_id = (
+                    stripe_refund.get(
+                        "id"
+                    )
+                )
+
+                refund_record.status = (
+                    "succeeded"
+                    if stripe_status
+                    == "succeeded"
+                    else "pending"
+                )
+
+
+            else:
+                # Cash was physically returned.
+                refund_record.status = (
+                    "succeeded"
+                )
+
+
+            db.commit()
+            db.refresh(
+                refund_record
+            )
+
+
+        except HTTPException:
+            raise
+
+
+        except stripe.error.StripeError as error:
+            refund_record.status = (
+                "failed"
+            )
+
+            db.commit()
+
+            message = (
+                getattr(
+                    error,
+                    "user_message",
+                    None,
+                )
+                or str(
+                    error
+                )
+            )
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Stripe refund error: "
+                    f"{message}"
+                ),
+            )
+
+
+        except Exception as error:
+            refund_record.status = (
+                "failed"
+            )
+
+            db.commit()
+
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Refund error: "
+                    f"{str(error)}"
+                ),
+            )
+
+
+    statuses = [
+        refund_record.status
+        for (
+            original_payment,
+            allocation_amount,
+            refund_record
+        )
+        in refund_records
+    ]
+
+
+    overall_status = (
+        "succeeded"
+        if all(
+            status == "succeeded"
+            for status in statuses
+        )
+        else "pending"
+    )
+
+
+    return {
+        "ok":
+            True,
+
+        "refund_id":
+            refund_records[0][2].id,
+
+        "refund_ids":
+            [
+                refund_record.id
+                for (
+                    original_payment,
+                    allocation_amount,
+                    refund_record
+                )
+                in refund_records
+            ],
+
+        "appointment_id":
+            appointment.id,
+
+        "payment_id":
+            refund_records[0][0].id,
+
+        "payment_ids":
+            [
+                original_payment.id
+                for (
+                    original_payment,
+                    allocation_amount,
+                    refund_record
+                )
+                in refund_records
+            ],
+
+        "method":
+            (
+                refund_records[0][0].method
+                if len(
+                    {
+                        original_payment.method
+                        for (
+                            original_payment,
+                            allocation_amount,
+                            refund_record
+                        )
+                        in refund_records
+                    }
+                ) == 1
+                else "multiple"
+            ),
+
+        "status":
+            overall_status,
+
+        "refund_total":
+            refund_total,
+
+        "remaining_refundable":
+            round(
+                max(
+                    0.0,
+                    remaining_refundable
+                    - refund_total,
+                ),
+                2,
+            ),
+
+        "lines":
+            refund_lines,
+    }
+
+
+# =========================================================
+# PUBLIC ONLINE BOOKING CANCELLATION
+# =========================================================
+
+@router.post(
+    "/public-cancel-booking"
+)
+def public_cancel_booking(
+    appointment_id: int,
+    booking_token: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Customer cancellation for an online booking.
+
+    Policy:
+      - More than 1 hour before appointment:
+        refund the deposit.
+      - 1 hour or less before appointment:
+        retain the deposit.
+    """
+
+    appointment = (
+        db.query(models.Appointment)
+        .filter(
+            models.Appointment.id
+            == appointment_id
+        )
+        .first()
+    )
+
+
+    if not appointment:
+        raise HTTPException(
+            status_code=404,
+            detail="Booking not found.",
+        )
+
+
+    # -----------------------------------------------------
+    # SECURITY
+    # -----------------------------------------------------
+
+    if (
+        not appointment.booking_token
+        or not booking_token
+        or appointment.booking_token
+        != booking_token
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid booking token.",
+        )
+
+
+    if appointment.booking_source != "online":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This is not an online booking."
+            ),
+        )
+
+
+    # -----------------------------------------------------
+    # ALREADY CANCELLED
+    # -----------------------------------------------------
+
+    if appointment.booking_status in (
+        "cancelled",
+        "late_cancelled",
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This booking has already "
+                "been cancelled."
+            ),
+        )
+
+
+    # -----------------------------------------------------
+    # UNPAID PENDING BOOKING
+    # -----------------------------------------------------
+
+    if (
+        appointment.booking_status
+        == "pending_deposit"
+    ):
+
+        appointment.booking_status = (
+            "cancelled"
+        )
+
+        appointment.deposit_expires_at = (
+            None
+        )
+
+        pending_payments = (
+            db.query(models.Payment)
+            .filter(
+                models.Payment.appointment_id
+                == appointment.id,
+                models.Payment.status
+                == "pending",
+            )
+            .all()
+        )
+
+
+        for payment in pending_payments:
+            payment.status = (
+                "cancelled"
+            )
+
+
+        db.commit()
+
+
+        return {
+            "ok":
+                True,
+
+            "appointment_id":
+                appointment.id,
+
+            "booking_status":
+                "cancelled",
+
+            "deposit_refunded":
+                False,
+
+            "deposit_retained":
+                False,
+
+            "refund_amount":
+                0.0,
+
+            "message":
+                (
+                    "Booking cancelled. "
+                    "No deposit had been paid."
+                ),
+        }
+
+
+    # -----------------------------------------------------
+    # FIND PAID DEPOSIT PAYMENT
+    # -----------------------------------------------------
+
+    deposit_amount = round(
+        float(
+            appointment.deposit_amount
+            or 0.0
+        ),
+        2,
+    )
+
+
+    paid_payments = (
+        db.query(models.Payment)
+        .filter(
+            models.Payment.appointment_id
+            == appointment.id,
+            models.Payment.status
+            == "paid",
+        )
+        .order_by(
+            models.Payment.created_at.asc()
+        )
+        .all()
+    )
+
+
+    deposit_payment = None
+
+
+    for payment in paid_payments:
+
+        payment_amount = round(
+            float(
+                payment.amount
+                or 0.0
+            ),
+            2,
+        )
+
+        if (
+            abs(
+                payment_amount
+                - deposit_amount
+            )
+            <= 0.01
+        ):
+            deposit_payment = (
+                payment
+            )
+
+            break
+
+
+    if not deposit_payment:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A completed deposit payment "
+                "could not be found."
+            ),
+        )
+
+
+    # -----------------------------------------------------
+    # CANCELLATION WINDOW
+    # -----------------------------------------------------
+
+    now = datetime.now()
+
+
+    if not appointment.start_time:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Appointment start time "
+                "is missing."
+            ),
+        )
+
+
+    seconds_until_appointment = (
+        appointment.start_time
+        - now
+    ).total_seconds()
+
+
+    more_than_one_hour = (
+        seconds_until_appointment
+        > 3600
+    )
+
+
+    # =====================================================
+    # LATE CANCELLATION
+    # DEPOSIT IS RETAINED
+    # =====================================================
+
+    if not more_than_one_hour:
+
+        appointment.booking_status = (
+            "late_cancelled"
+        )
+
+        appointment.deposit_expires_at = (
+            None
+        )
+
+
+        db.commit()
+
+
+        return {
+            "ok":
+                True,
+
+            "appointment_id":
+                appointment.id,
+
+            "booking_status":
+                "late_cancelled",
+
+            "deposit_refunded":
+                False,
+
+            "deposit_retained":
+                True,
+
+            "refund_amount":
+                0.0,
+
+            "deposit_amount":
+                deposit_amount,
+
+            "message":
+                (
+                    "Booking cancelled within "
+                    "1 hour of the appointment. "
+                    "The deposit was retained."
+                ),
+        }
+
+
+    # =====================================================
+    # EARLY CANCELLATION
+    # REFUND DEPOSIT
+    # =====================================================
+
+    previous_deposit_refund = (
+        db.query(models.RefundLine)
+        .join(
+            models.Refund,
+            models.Refund.id
+            == models.RefundLine.refund_id
+        )
+        .filter(
+            models.Refund.appointment_id
+            == appointment.id,
+            models.Refund.payment_id
+            == deposit_payment.id,
+            models.Refund.status.in_(
+                (
+                    "pending",
+                    "succeeded",
+                )
+            ),
+            models.RefundLine.kind
+            == "deposit",
+        )
+        .first()
+    )
+
+
+    if previous_deposit_refund:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This deposit has already "
+                "been refunded."
+            ),
+        )
+
+
+    refund_amount = round(
+        float(
+            deposit_payment.amount
+            or 0.0
+        ),
+        2,
+    )
+
+
+    if refund_amount <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Deposit refund amount is invalid."
+            ),
+        )
+
+
+    refund = models.Refund(
+        appointment_id=
+            appointment.id,
+
+        payment_id=
+            deposit_payment.id,
+
+        method=
+            deposit_payment.method,
+
+        status=
+            "pending",
+
+        amount=
+            refund_amount,
+
+        reason=
+            "Online booking cancelled more than 1 hour before appointment.",
+    )
+
+
+    db.add(refund)
+    db.flush()
+
+
+    refund_line = models.RefundLine(
+        refund_id=
+            refund.id,
+
+        kind=
+            "deposit",
+
+        sale_id=
+            None,
+
+        staff_id=
+            appointment.staff_id,
+
+        description=
+            "Booking Deposit",
+
+        quantity=
+            1,
+
+        subtotal=
+            refund_amount,
+
+        tax_amount=
+            0.0,
+
+        total=
+            refund_amount,
+    )
+
+
+    db.add(refund_line)
+    db.flush()
+
+
+    # -----------------------------------------------------
+    # PROCESS REFUND
+    # -----------------------------------------------------
+
+    try:
+
+        if deposit_payment.method != "card":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Online deposit payment "
+                    "is not a card payment."
+                ),
+            )
+
+
+        if not STRIPE_SECRET_KEY:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Stripe is not configured "
+                    "(missing STRIPE_SECRET_KEY)."
+                ),
+            )
+
+
+        if (
+            not deposit_payment
+            .stripe_payment_intent_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Deposit payment does not "
+                    "have a Stripe PaymentIntent ID."
+                ),
+            )
+
+
+        stripe_refund = (
+            stripe.Refund.create(
+                payment_intent=
+                    deposit_payment
+                    .stripe_payment_intent_id,
+
+                amount=
+                    int(
+                        round(
+                            refund_amount
+                            * 100
+                        )
+                    ),
+
+                metadata={
+                    "appointment_id":
+                        str(
+                            appointment.id
+                        ),
+
+                    "payment_id":
+                        str(
+                            deposit_payment.id
+                        ),
+
+                    "refund_id":
+                        str(
+                            refund.id
+                        ),
+
+                    "refund_kind":
+                        "deposit",
+                },
+            )
+        )
+
+
+        stripe_status = (
+            stripe_refund.get(
+                "status"
+            )
+            or "succeeded"
+        )
+
+
+        if stripe_status not in (
+            "succeeded",
+            "pending",
+        ):
+
+            refund.status = (
+                "failed"
+            )
+
+            db.commit()
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Stripe did not complete "
+                    "the deposit refund."
+                ),
+            )
+
+
+        refund.stripe_refund_id = (
+            stripe_refund.get(
+                "id"
+            )
+        )
+
+
+        refund.status = (
+            "succeeded"
+            if stripe_status
+            == "succeeded"
+            else "pending"
+        )
+
+
+        appointment.booking_status = (
+            "cancelled"
+        )
+
+        appointment.deposit_expires_at = (
+            None
+        )
+
+
+        db.commit()
+        db.refresh(refund)
+
+
+    except HTTPException:
+
+        db.rollback()
+        raise
+
+
+    except stripe.error.StripeError as e:
+
+        db.rollback()
+
+        message = (
+            getattr(
+                e,
+                "user_message",
+                None,
+            )
+            or str(e)
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Stripe deposit refund error: "
+                f"{message}"
+            ),
+        )
+
+
+    except Exception as e:
+
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Deposit cancellation error: "
+                f"{str(e)}"
+            ),
+        )
+
+
+    return {
+        "ok":
+            True,
+
+        "appointment_id":
+            appointment.id,
+
+        "booking_status":
+            "cancelled",
+
+        "deposit_refunded":
+            True,
+
+        "deposit_retained":
+            False,
+
+        "refund_id":
+            refund.id,
+
+        "refund_status":
+            refund.status,
+
+        "refund_amount":
+            refund_amount,
+
+        "message":
+            (
+                "Booking cancelled and "
+                "deposit refund submitted."
+            ),
+    }
+
+
+
+# =========================================================
+# OWNER / RECEPTIONIST APPOINTMENT CANCELLATION
+# =========================================================
+
+@router.post(
+    "/appointment/{appointment_id}/cancel"
+)
+def cancel_appointment_by_staff(
+    appointment_id: int,
+    payload: StaffCancelRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(
+        deps.get_current_user
+    ),
+):
+    """
+    Cancel an appointment without deleting its history.
+
+    Owner/receptionist explicitly chooses whether a paid
+    booking deposit should be refunded or retained.
+    """
+
+    if current_user.role not in (
+        "owner",
+        "receptionist",
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only the owner or receptionist "
+                "can cancel appointments."
+            ),
+        )
+
+
+    appointment = _get_appointment(
+        appointment_id,
+        db,
+    )
+
+
+    if appointment.booking_status in (
+        "cancelled",
+        "late_cancelled",
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This appointment has already "
+                "been cancelled."
+            ),
+        )
+
+
+    # Do not make a deposit decision while Stripe payment
+    # confirmation is still waiting for its webhook.
+    pending_payment = (
+        db.query(models.Payment)
+        .filter(
+            models.Payment.appointment_id
+            == appointment.id,
+            models.Payment.status
+            == "pending",
+        )
+        .first()
+    )
+
+
+    if pending_payment:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A payment is still processing. Wait for "
+                "Stripe confirmation before cancelling."
+            ),
+        )
+
+
+    paid_payments = (
+        db.query(models.Payment)
+        .filter(
+            models.Payment.appointment_id
+            == appointment.id,
+            models.Payment.status
+            == "paid",
+        )
+        .order_by(
+            models.Payment.created_at.asc()
+        )
+        .all()
+    )
+
+
+    deposit_amount = round(
+        float(
+            appointment.deposit_amount
+            or 0.0
+        ),
+        2,
+    )
+
+
+    # No payment exists, so cancellation only releases
+    # the appointment time.
+    if not paid_payments:
+        appointment.booking_status = (
+            "cancelled"
+        )
+
+        appointment.deposit_expires_at = (
+            None
+        )
+
+        db.commit()
+
+
+        return {
+            "ok":
+                True,
+
+            "appointment_id":
+                appointment.id,
+
+            "booking_status":
+                "cancelled",
+
+            "deposit_refunded":
+                False,
+
+            "deposit_retained":
+                False,
+
+            "refund_amount":
+                0.0,
+
+            "message":
+                (
+                    "Appointment cancelled. "
+                    "No payment had been recorded."
+                ),
+        }
+
+
+    if deposit_amount <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This appointment has a completed payment "
+                "but no booking deposit. Use the regular "
+                "refund flow instead."
+            ),
+        )
+
+
+    deposit_payment = None
+
+
+    for payment in paid_payments:
+        payment_amount = round(
+            float(
+                payment.amount
+                or 0.0
+            ),
+            2,
+        )
+
+        if (
+            abs(
+                payment_amount
+                - deposit_amount
+            )
+            <= 0.01
+        ):
+            deposit_payment = payment
+            break
+
+
+    if not deposit_payment:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The completed booking deposit could "
+                "not be identified."
+            ),
+        )
+
+
+    successful_refunds = (
+        db.query(models.Refund)
+        .filter(
+            models.Refund.appointment_id
+            == appointment.id,
+            models.Refund.status
+            == "succeeded",
+        )
+        .all()
+    )
+
+
+    net_paid = round(
+        sum(
+            float(payment.amount or 0.0)
+            for payment in paid_payments
+        )
+        -
+        sum(
+            float(refund.amount or 0.0)
+            for refund in successful_refunds
+        ),
+        2,
+    )
+
+
+    if net_paid > deposit_amount + 0.005:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This appointment has payments beyond "
+                "the booking deposit. Use the regular "
+                "refund flow before cancelling."
+            ),
+        )
+
+
+    previous_deposit_refund = (
+        db.query(models.RefundLine)
+        .join(
+            models.Refund,
+            models.Refund.id
+            == models.RefundLine.refund_id
+        )
+        .filter(
+            models.Refund.appointment_id
+            == appointment.id,
+            models.Refund.payment_id
+            == deposit_payment.id,
+            models.Refund.status.in_(
+                (
+                    "pending",
+                    "succeeded",
+                )
+            ),
+            models.RefundLine.kind
+            == "deposit",
+        )
+        .first()
+    )
+
+
+    if previous_deposit_refund:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This deposit has already been "
+                "refunded or is being refunded."
+            ),
+        )
+
+
+    # The owner/receptionist chose to retain the deposit.
+    if not payload.refund_deposit:
+        appointment.booking_status = (
+            "cancelled"
+        )
+
+        appointment.deposit_expires_at = (
+            None
+        )
+
+        db.commit()
+
+
+        return {
+            "ok":
+                True,
+
+            "appointment_id":
+                appointment.id,
+
+            "booking_status":
+                "cancelled",
+
+            "deposit_refunded":
+                False,
+
+            "deposit_retained":
+                True,
+
+            "deposit_amount":
+                deposit_amount,
+
+            "refund_amount":
+                0.0,
+
+            "message":
+                (
+                    "Appointment cancelled and "
+                    "deposit retained."
+                ),
+        }
+
+
+    if deposit_payment.method != "card":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The booking deposit is not a "
+                "card payment."
+            ),
+        )
+
+
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Stripe is not configured "
+                "(missing STRIPE_SECRET_KEY)."
+            ),
+        )
+
+
+    if not deposit_payment.stripe_payment_intent_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The deposit payment does not have "
+                "a Stripe PaymentIntent ID."
+            ),
+        )
+
+
+    refund_amount = round(
+        float(
+            deposit_payment.amount
+            or 0.0
+        ),
+        2,
+    )
+
+
+    reason = (
+        payload.reason.strip()
+        if (
+            payload.reason
+            and payload.reason.strip()
+        )
+        else (
+            "Appointment cancelled by owner/receptionist; "
+            "deposit refunded by staff decision."
+        )
+    )
+
+
+    refund = models.Refund(
+        appointment_id=
+            appointment.id,
+
+        payment_id=
+            deposit_payment.id,
+
+        method=
+            deposit_payment.method,
+
+        status=
+            "pending",
+
+        amount=
+            refund_amount,
+
+        reason=
+            reason,
+    )
+
+
+    db.add(refund)
+    db.flush()
+
+
+    db.add(
+        models.RefundLine(
+            refund_id=
+                refund.id,
+
+            kind=
+                "deposit",
+
+            sale_id=
+                None,
+
+            staff_id=
+                appointment.staff_id,
+
+            description=
+                "Booking Deposit",
+
+            quantity=
+                1,
+
+            subtotal=
+                refund_amount,
+
+            tax_amount=
+                0.0,
+
+            total=
+                refund_amount,
+        )
+    )
+
+
+    # Preserve the attempted refund before calling Stripe.
+    db.commit()
+    db.refresh(refund)
+
+
+    try:
+        stripe_refund = stripe.Refund.create(
+            payment_intent=
+                deposit_payment
+                .stripe_payment_intent_id,
+
+            amount=
+                int(
+                    round(
+                        refund_amount
+                        * 100
+                    )
+                ),
+
+            metadata={
+                "appointment_id":
+                    str(
+                        appointment.id
+                    ),
+
+                "payment_id":
+                    str(
+                        deposit_payment.id
+                    ),
+
+                "refund_id":
+                    str(
+                        refund.id
+                    ),
+
+                "refund_kind":
+                    "deposit",
+
+                "cancelled_by_user_id":
+                    str(
+                        current_user.id
+                    ),
+            },
+        )
+
+
+        stripe_status = (
+            stripe_refund.get(
+                "status"
+            )
+            or "succeeded"
+        )
+
+
+        if stripe_status not in (
+            "succeeded",
+            "pending",
+        ):
+            refund.status = (
+                "failed"
+            )
+
+            db.commit()
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Stripe did not complete "
+                    "the deposit refund."
+                ),
+            )
+
+
+        refund.stripe_refund_id = (
+            stripe_refund.get(
+                "id"
+            )
+        )
+
+        refund.status = (
+            "succeeded"
+            if stripe_status == "succeeded"
+            else "pending"
+        )
+
+        appointment.booking_status = (
+            "cancelled"
+        )
+
+        appointment.deposit_expires_at = (
+            None
+        )
+
+        db.commit()
+        db.refresh(refund)
+
+
+    except HTTPException:
+        raise
+
+
+    except stripe.error.StripeError as error:
+        refund.status = (
+            "failed"
+        )
+
+        db.commit()
+
+        message = (
+            getattr(
+                error,
+                "user_message",
+                None,
+            )
+            or str(error)
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Stripe deposit refund error: "
+                f"{message}"
+            ),
+        )
+
+
+    except Exception as error:
+        refund.status = (
+            "failed"
+        )
+
+        db.commit()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Deposit cancellation error: "
+                f"{str(error)}"
+            ),
+        )
+
+
+    return {
+        "ok":
+            True,
+
+        "appointment_id":
+            appointment.id,
+
+        "booking_status":
+            "cancelled",
+
+        "deposit_refunded":
+            True,
+
+        "deposit_retained":
+            False,
+
+        "deposit_amount":
+            deposit_amount,
+
+        "refund_id":
+            refund.id,
+
+        "refund_status":
+            refund.status,
+
+        "refund_amount":
+            refund_amount,
+
+        "message":
+            (
+                "Appointment cancelled and "
+                "deposit refund submitted."
+            ),
+    }
+
+
+
+# =========================================================
+# STAFF PHONE BOOKING — MOTO DEPOSIT
+# =========================================================
+
+def _complete_moto_deposit(
+    appointment,
+    payment,
+    db: Session,
+):
+    payment.status = "paid"
+    payment.method = "card"
+
+    appointment.booking_status = (
+        "confirmed"
+    )
+
+    appointment.deposit_expires_at = (
+        None
+    )
+
+    db.commit()
+    db.refresh(payment)
+    db.refresh(appointment)
+
+    email_result = (
+        send_booking_confirmation_email(
+            db,
+            appointment,
+        )
+    )
+
+    if not email_result.get(
+        "sent"
+    ):
+        print(
+            "Phone booking confirmation email:",
+            email_result,
+        )
+
+
+@router.post(
+    "/appointment/{appointment_id}"
+    "/moto-deposit/start"
+)
+def start_moto_deposit(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(
+        deps.get_current_user
+    ),
+):
+    appointment = _get_appointment(
+        appointment_id,
+        db,
+    )
+
+    _authorize_appointment(
+        appointment,
+        current_user,
+    )
+
+    if appointment.booking_status == "confirmed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This appointment is already confirmed."
+            ),
+        )
+
+    if appointment.booking_status in (
+        "cancelled",
+        "late_cancelled",
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This appointment has been cancelled."
+            ),
+        )
+
+    if not appointment.deposit_required:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This appointment does not require "
+                "a deposit."
+            ),
+        )
+
+    deposit_amount = round(
+        float(
+            appointment.deposit_amount
+            or 0.0
+        ),
+        2,
+    )
+
+    if deposit_amount <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The appointment deposit amount "
+                "is invalid."
+            ),
+        )
+
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Stripe is not configured."
+            ),
+        )
+
+    if not STRIPE_TERMINAL_READER_ID:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "STRIPE_TERMINAL_READER_ID "
+                "is not configured."
+            ),
+        )
+
+    paid_deposit = (
+        db.query(models.Payment)
+        .filter(
+            models.Payment.appointment_id
+            == appointment.id,
+            models.Payment.status
+            == "paid",
+        )
+        .first()
+    )
+
+    if paid_deposit:
+        _complete_moto_deposit(
+            appointment,
+            paid_deposit,
+            db,
+        )
+
+        return {
+            "ok": True,
+            "appointment_id":
+                appointment.id,
+            "payment_id":
+                paid_deposit.id,
+            "payment_status":
+                "paid",
+            "booking_status":
+                "confirmed",
+            "deposit_amount":
+                deposit_amount,
+        }
+
+    pending_payment = (
+        db.query(models.Payment)
+        .filter(
+            models.Payment.appointment_id
+            == appointment.id,
+            models.Payment.status
+            == "pending",
+            models.Payment
+            .stripe_payment_intent_id
+            .isnot(None),
+        )
+        .order_by(
+            models.Payment.created_at.desc()
+        )
+        .first()
+    )
+
+    if pending_payment:
+        try:
+            existing_intent = (
+                stripe.PaymentIntent.retrieve(
+                    pending_payment
+                    .stripe_payment_intent_id
+                )
+            )
+
+            existing_status = (
+                existing_intent.get(
+                    "status"
+                )
+            )
+
+            if existing_status == "succeeded":
+                _complete_moto_deposit(
+                    appointment,
+                    pending_payment,
+                    db,
+                )
+
+                return {
+                    "ok": True,
+                    "appointment_id":
+                        appointment.id,
+                    "payment_id":
+                        pending_payment.id,
+                    "payment_status":
+                        "paid",
+                    "booking_status":
+                        "confirmed",
+                    "deposit_amount":
+                        deposit_amount,
+                }
+
+            return {
+                "ok": True,
+                "already_started": True,
+                "appointment_id":
+                    appointment.id,
+                "payment_id":
+                    pending_payment.id,
+                "payment_intent_id":
+                    pending_payment
+                    .stripe_payment_intent_id,
+                "payment_status":
+                    existing_status
+                    or "pending",
+                "booking_status":
+                    appointment.booking_status,
+                "deposit_amount":
+                    deposit_amount,
+                "reader_id":
+                    STRIPE_TERMINAL_READER_ID,
+            }
+
+        except stripe.error.StripeError:
+            pending_payment.status = (
+                "cancelled"
+            )
+
+            db.commit()
+
+    payment = models.Payment(
+        appointment_id=
+            appointment.id,
+
+        amount=
+            deposit_amount,
+
+        tip_amount=
+            0.0,
+
+        method=
+            "card",
+
+        status=
+            "pending",
+    )
+
+    db.add(payment)
+    db.flush()
+
+    payment_intent = None
+
+    try:
+        payment_intent = (
+            stripe.PaymentIntent.create(
+                amount=
+                    int(
+                        round(
+                            deposit_amount
+                            * 100
+                        )
+                    ),
+
+                currency=
+                    "usd",
+
+                payment_method_types=(
+                    [
+                        "card_present",
+                    ]
+                    if STRIPE_MOTO_SIMULATION
+                    else [
+                        "card",
+                    ]
+                ),
+
+                capture_method=
+                    "automatic",
+
+                description=(
+                    "Image & Style phone "
+                    f"booking deposit "
+                    f"for appointment "
+                    f"#{appointment.id}"
+                ),
+
+                metadata={
+                    "appointment_id":
+                        str(
+                            appointment.id
+                        ),
+
+                    "payment_id":
+                        str(
+                            payment.id
+                        ),
+
+                    "payment_kind":
+                        "moto_deposit",
+                },
+            )
+        )
+
+        payment.stripe_payment_intent_id = (
+            payment_intent.id
+        )
+
+        db.commit()
+        db.refresh(payment)
+
+        reader_parameters = {
+            "payment_intent":
+                payment_intent.id,
+        }
+
+        if not STRIPE_MOTO_SIMULATION:
+            reader_parameters[
+                "process_config"
+            ] = {
+                "moto":
+                    True,
+            }
+
+        reader = (
+            stripe.terminal.Reader
+            .process_payment_intent(
+                STRIPE_TERMINAL_READER_ID,
+                **reader_parameters,
+            )
+        )
+
+        # Server-driven simulated readers have no UI.
+        # Present Stripe's default successful test card.
+        if STRIPE_MOTO_SIMULATION:
+            simulator_response = (
+                requests.post(
+                    (
+                        "https://api.stripe.com/v1/"
+                        "test_helpers/terminal/readers/"
+                        f"{STRIPE_TERMINAL_READER_ID}/"
+                        "present_payment_method"
+                    ),
+                    auth=(
+                        STRIPE_SECRET_KEY,
+                        "",
+                    ),
+                    timeout=30,
+                )
+            )
+
+            if not simulator_response.ok:
+                raise RuntimeError(
+                    "Stripe simulator error: "
+                    + simulator_response.text
+                )
+
+            reader = (
+                simulator_response.json()
+            )
+
+            simulated_intent = (
+                stripe.PaymentIntent.retrieve(
+                    payment_intent.id
+                )
+            )
+
+            if (
+                simulated_intent.status
+                == "requires_capture"
+            ):
+                simulated_intent = (
+                    stripe.PaymentIntent.capture(
+                        simulated_intent.id
+                    )
+                )
+
+            if (
+                simulated_intent.status
+                == "succeeded"
+            ):
+                _complete_moto_deposit(
+                    appointment,
+                    payment,
+                    db,
+                )
+
+    except stripe.error.StripeError as error:
+        db.rollback()
+
+        stored_payment = (
+            db.query(models.Payment)
+            .filter(
+                models.Payment.id
+                == payment.id
+            )
+            .first()
+        )
+
+        if stored_payment:
+            stored_payment.status = (
+                "cancelled"
+            )
+
+            db.commit()
+
+        message = (
+            getattr(
+                error,
+                "user_message",
+                None,
+            )
+            or str(error)
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Stripe MOTO deposit error: "
+                f"{message}"
+            ),
+        )
+
+    except Exception as error:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "MOTO deposit error: "
+                f"{str(error)}"
+            ),
+        )
+
+    reader_action = (
+        reader.get("action")
+        or {}
+    )
+
+    return {
+        "ok":
+            True,
+
+        "appointment_id":
+            appointment.id,
+
+        "payment_id":
+            payment.id,
+
+        "payment_intent_id":
+            payment_intent.id,
+
+        "payment_status":
+            payment_intent.get(
+                "status"
+            ),
+
+        "booking_status":
+            appointment.booking_status,
+
+        "deposit_amount":
+            deposit_amount,
+
+        "reader_id":
+            reader.get(
+                "id"
+            ),
+
+        "reader_status":
+            reader.get(
+                "status"
+            ),
+
+        "reader_action_status":
+            reader_action.get(
+                "status"
+            ),
+    }
+
+
+@router.get(
+    "/appointment/{appointment_id}"
+    "/moto-deposit/status"
+)
+def moto_deposit_status(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(
+        deps.get_current_user
+    ),
+):
+    appointment = _get_appointment(
+        appointment_id,
+        db,
+    )
+
+    _authorize_appointment(
+        appointment,
+        current_user,
+    )
+
+    payment = (
+        db.query(models.Payment)
+        .filter(
+            models.Payment.appointment_id
+            == appointment.id,
+            models.Payment
+            .stripe_payment_intent_id
+            .isnot(None),
+        )
+        .order_by(
+            models.Payment.created_at.desc()
+        )
+        .first()
+    )
+
+    if not payment:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No MOTO deposit payment "
+                "was found."
+            ),
+        )
+
+    try:
+        payment_intent = (
+            stripe.PaymentIntent.retrieve(
+                payment
+                .stripe_payment_intent_id
+            )
+        )
+
+        intent_status = (
+            payment_intent.get(
+                "status"
+            )
+            or "pending"
+        )
+
+        if intent_status == "requires_capture":
+            payment_intent = (
+                stripe.PaymentIntent.capture(
+                    payment_intent.id
+                )
+            )
+
+            intent_status = (
+                payment_intent.get(
+                    "status"
+                )
+                or intent_status
+            )
+
+        if intent_status == "succeeded":
+            _complete_moto_deposit(
+                appointment,
+                payment,
+                db,
+            )
+
+            return {
+                "ok":
+                    True,
+
+                "complete":
+                    True,
+
+                "appointment_id":
+                    appointment.id,
+
+                "payment_id":
+                    payment.id,
+
+                "payment_status":
+                    "paid",
+
+                "booking_status":
+                    "confirmed",
+
+                "deposit_amount":
+                    round(
+                        float(
+                            payment.amount
+                            or 0.0
+                        ),
+                        2,
+                    ),
+            }
+
+        reader = (
+            stripe.terminal.Reader.retrieve(
+                STRIPE_TERMINAL_READER_ID
+            )
+        )
+
+        action = (
+            reader.get("action")
+            or {}
+        )
+
+        action_status = (
+            action.get(
+                "status"
+            )
+        )
+
+        failure_message = (
+            action.get(
+                "failure_message"
+            )
+        )
+
+        if (
+            action_status == "failed"
+            or intent_status == "canceled"
+        ):
+            payment.status = (
+                "cancelled"
+            )
+
+            db.commit()
+
+            return {
+                "ok":
+                    False,
+
+                "complete":
+                    False,
+
+                "appointment_id":
+                    appointment.id,
+
+                "payment_id":
+                    payment.id,
+
+                "payment_status":
+                    intent_status,
+
+                "booking_status":
+                    appointment.booking_status,
+
+                "reader_action_status":
+                    action_status,
+
+                "error":
+                    failure_message
+                    or (
+                        "The MOTO deposit "
+                        "was not completed."
+                    ),
+            }
+
+        return {
+            "ok":
+                True,
+
+            "complete":
+                False,
+
+            "appointment_id":
+                appointment.id,
+
+            "payment_id":
+                payment.id,
+
+            "payment_status":
+                intent_status,
+
+            "booking_status":
+                appointment.booking_status,
+
+            "reader_status":
+                reader.get(
+                    "status"
+                ),
+
+            "reader_action_status":
+                action_status,
+
+            "deposit_amount":
+                round(
+                    float(
+                        payment.amount
+                        or 0.0
+                    ),
+                    2,
+                ),
+        }
+
+    except stripe.error.StripeError as error:
+        message = (
+            getattr(
+                error,
+                "user_message",
+                None,
+            )
+            or str(error)
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Stripe MOTO status error: "
+                f"{message}"
+            ),
+        )
+
+
+
+# =========================================================
+# STRIPE WEBHOOK
+# =========================================================
+
+@router.post(
+    "/webhook"
+)
+async def stripe_webhook(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if not STRIPE_WEBHOOK_SECRET:
+
+        return JSONResponse(
+            status_code=500,
+
+            content={
+                "error": (
+                    "Webhook not configured "
+                    "(STRIPE_WEBHOOK_SECRET missing)."
+                )
+            },
+        )
+
+
+    payload = await request.body()
+
+
+    sig_header = request.headers.get(
+        "stripe-signature"
+    )
+
+
+    if not sig_header:
+
+        return JSONResponse(
+            status_code=400,
+
+            content={
+                "error":
+                    "Missing Stripe signature."
+            },
+        )
+
+
+    try:
+
+        event = (
+            stripe.Webhook.construct_event(
+                payload=
+                    payload,
+
+                sig_header=
+                    sig_header,
+
+                secret=
+                    STRIPE_WEBHOOK_SECRET,
+            )
+        )
+
+
+    except (
+        stripe.error
+        .SignatureVerificationError
+    ):
+
+        return JSONResponse(
+            status_code=400,
+
+            content={
+                "error":
+                    "Invalid Stripe signature."
+            },
+        )
+
+
+    except Exception as e:
+
+        return JSONResponse(
+            status_code=400,
+
+            content={
+                "error":
+                    str(e)
+            },
+        )
+
+
+    # =====================================================
+    # MOTO DEPOSIT COMPLETED
+    # =====================================================
+
+    if (
+        event["type"]
+        == "payment_intent.succeeded"
+    ):
+        intent = (
+            event["data"]["object"]
+        )
+
+        metadata = (
+            intent.get("metadata")
+            or {}
+        )
+
+        if (
+            metadata.get(
+                "payment_kind"
+            )
+            == "moto_deposit"
+        ):
+            try:
+                appointment_id = int(
+                    metadata.get(
+                        "appointment_id"
+                    )
+                )
+
+                payment_id = int(
+                    metadata.get(
+                        "payment_id"
+                    )
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error":
+                            "Invalid MOTO metadata."
+                    },
+                )
+
+            appointment = (
+                db.query(
+                    models.Appointment
+                )
+                .filter(
+                    models.Appointment.id
+                    == appointment_id
+                )
+                .first()
+            )
+
+            payment = (
+                db.query(
+                    models.Payment
+                )
+                .filter(
+                    models.Payment.id
+                    == payment_id,
+                    models.Payment
+                    .appointment_id
+                    == appointment_id,
+                )
+                .first()
+            )
+
+            if not appointment or not payment:
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "error":
+                            "MOTO appointment or "
+                            "payment not found."
+                    },
+                )
+
+            payment.stripe_payment_intent_id = (
+                intent.get("id")
+            )
+
+            _complete_moto_deposit(
+                appointment,
+                payment,
+                db,
+            )
+
+            return {
+                "received":
+                    True,
+
+                "appointment_id":
+                    appointment.id,
+
+                "payment_id":
+                    payment.id,
+
+                "payment_status":
+                    "paid",
+
+                "booking_status":
+                    "confirmed",
+
+                "payment_kind":
+                    "moto_deposit",
+            }
+
+
+
+    # =====================================================
+    # CHECKOUT COMPLETED
+    # =====================================================
+
+    if (
+        event["type"]
+        == "checkout.session.completed"
+    ):
+
+        session = (
+            event["data"]["object"]
+        )
+
+
+        payment_status = (
+            session.get(
+                "payment_status"
+            )
+        )
+
+
+        if payment_status != "paid":
+
+            return {
+                "received":
+                    True,
+
+                "payment_status":
+                    payment_status,
+            }
+
+
+        metadata = (
+            session.get(
+                "metadata"
+            )
+            or {}
+        )
+
+
+        appointment_id_raw = (
+            metadata.get(
+                "appointment_id"
+            )
+        )
+
+
+        payment_id_raw = (
+            metadata.get(
+                "payment_id"
+            )
+        )
+
+
+        tip_cents_raw = (
+            metadata.get(
+                "tip_cents",
+                "0",
+            )
+        )
+
+
+        payment_kind = (
+            metadata.get(
+                "payment_kind",
+                "checkout",
+            )
+        )
+
+
+        if (
+            not appointment_id_raw
+            or not payment_id_raw
+        ):
+
+            return JSONResponse(
+                status_code=400,
+
+                content={
+                    "error": (
+                        "Missing appointment_id "
+                        "or payment_id metadata."
+                    )
+                },
+            )
+
+
+        try:
+
+            appointment_id = int(
+                appointment_id_raw
+            )
+
+
+            payment_id = int(
+                payment_id_raw
+            )
+
+
+            tip_cents = int(
+                tip_cents_raw
+            )
+
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            return JSONResponse(
+                status_code=400,
+
+                content={
+                    "error":
+                        "Invalid payment metadata."
+                },
+            )
+
+
+        appointment = (
+            db.query(
+                models.Appointment
+            )
+            .filter(
+                models.Appointment.id
+                == appointment_id
+            )
+            .first()
+        )
+
+
+        payment = (
+            db.query(
+                models.Payment
+            )
+            .filter(
+                models.Payment.id
+                == payment_id
+            )
+            .first()
+        )
+
+
+        if not appointment:
+
+            return JSONResponse(
+                status_code=404,
+
+                content={
+                    "error":
+                        "Appointment not found."
+                },
+            )
+
+
+        if not payment:
+
+            return JSONResponse(
+                status_code=404,
+
+                content={
+                    "error":
+                        "Payment record not found."
+                },
+            )
+
+
+        tip_amount = round(
+            tip_cents
+            / 100.0,
+            2,
+        )
+
+
+        # Idempotent:
+        # receiving the same webhook twice does NOT
+        # create another payment or double the tip.
+
+        payment.status = (
+            "paid"
+        )
+
+
+        payment.method = (
+            "card"
+        )
+
+
+        payment.tip_amount = (
+            tip_amount
+        )
+
+
+        payment.stripe_checkout_session_id = (
+            session.get("id")
+        )
+
+
+        payment.stripe_payment_intent_id = (
+            session.get(
+                "payment_intent"
+            )
+        )
+
+
+        if payment_kind == "deposit":
+
+            # Deposit confirms an online booking.
+            # It is NOT a tip and should not change
+            # the appointment tip amount.
+
+            appointment.booking_status = (
+                "confirmed"
+            )
+
+            appointment.deposit_expires_at = (
+                None
+            )
+
+        else:
+
+            _update_appointment_tip(
+                appointment,
+                tip_amount,
+            )
+
+
+        db.commit()
+
+
+        if payment_kind == "deposit":
+            email_result = (
+                send_booking_confirmation_email(
+                    db,
+                    appointment,
+                )
+            )
+
+            if not email_result.get(
+                "sent"
+            ):
+                print(
+                    "Booking confirmation email:",
+                    email_result,
+                )
+
+
+        return {
+            "received":
+                True,
+
+            "appointment_id":
+                appointment.id,
+
+            "payment_id":
+                payment.id,
+
+            "payment_status":
+                "paid",
+
+            "method":
+                "card",
+
+            "payment_kind":
+                payment_kind,
+
+            "tip":
+                tip_amount,
+        }
+
+
+    # =====================================================
+    # CHECKOUT EXPIRED
+    # =====================================================
+
+    if (
+        event["type"]
+        == "checkout.session.expired"
+    ):
+
+        session = (
+            event["data"]["object"]
+        )
+
+
+        metadata = (
+            session.get(
+                "metadata"
+            )
+            or {}
+        )
+
+
+        payment_id_raw = (
+            metadata.get(
+                "payment_id"
+            )
+        )
+
+
+        appointment_id_raw = (
+            metadata.get(
+                "appointment_id"
+            )
+        )
+
+
+        payment_kind = (
+            metadata.get(
+                "payment_kind",
+                "checkout",
+            )
+        )
+
+
+        if payment_id_raw:
+
+            try:
+
+                payment_id = int(
+                    payment_id_raw
+                )
+
+
+                payment = (
+                    db.query(
+                        models.Payment
+                    )
+                    .filter(
+                        models.Payment.id
+                        == payment_id
+                    )
+                    .first()
+                )
+
+
+                if (
+                    payment
+                    and payment.status
+                    == "pending"
+                ):
+
+                    payment.status = (
+                        "cancelled"
+                    )
+
+
+                    # If this was an online deposit checkout
+                    # that expired before payment, release
+                    # the temporary appointment hold.
+
+                    if (
+                        payment_kind
+                        == "deposit"
+                        and appointment_id_raw
+                    ):
+
+                        try:
+
+                            appointment_id = int(
+                                appointment_id_raw
+                            )
+
+
+                            appointment = (
+                                db.query(
+                                    models.Appointment
+                                )
+                                .filter(
+                                    models.Appointment.id
+                                    == appointment_id
+                                )
+                                .first()
+                            )
+
+
+                            if (
+                                appointment
+                                and appointment.booking_status
+                                == "pending_deposit"
+                            ):
+
+                                appointment.booking_status = (
+                                    "cancelled"
+                                )
+
+                                appointment.deposit_expires_at = (
+                                    None
+                                )
+
+
+                        except (
+                            TypeError,
+                            ValueError,
+                        ):
+                            pass
+
+
+                    db.commit()
+
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+                pass
+
+
+    return {
+        "received":
+            True,
+
+        "event_type":
+            event["type"],
+    }

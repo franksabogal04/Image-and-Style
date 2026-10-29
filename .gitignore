@@ -19,3 +19,11 @@ build/
 .DS_Store
 
 .vscode/
+# Image & Style private configuration
+.env*
+**/.env*
+
+# Local development databases
+backend/salon.db*
+backend/PATH_TO_DB
+

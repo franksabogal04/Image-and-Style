@@ -1,0 +1,5852 @@
+// frontend/app/screens/ClientHomeScreen.js
+
+import React, {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+
+import {
+  View,
+  Text,
+  ScrollView,
+  TouchableOpacity,
+  Image,
+  TextInput,
+  ActivityIndicator,
+  Alert,
+  useWindowDimensions,
+  Linking,
+} from 'react-native';
+
+import {
+  SafeAreaView,
+} from 'react-native-safe-area-context';
+
+import {
+  StatusBar,
+} from 'expo-status-bar';
+
+import {
+  Calendar,
+} from 'react-native-calendars';
+
+import {
+  API_BASE_URL,
+} from '../config';
+
+import {
+  COLORS,
+  RADIUS,
+  SHADOWS,
+} from '../theme';
+
+
+const BRAND_LOGO =
+  require('../../assets/image-style-logo.png');
+
+
+/* =========================================================
+   SERVICE CATEGORIES
+========================================================= */
+
+const SERVICE_CATEGORIES = [
+  {
+    slug: 'hair',
+    title: 'Hair',
+    description:
+      'Cuts, styling, color, treatments, and professional hair care.',
+    icon: '✦',
+  },
+  {
+    slug: 'nails',
+    title: 'Nails',
+    description:
+      'Manicures, pedicures, acrylics, gel, and custom nail designs.',
+    icon: '◇',
+  },
+  {
+    slug: 'eyelashes',
+    title: 'Lashes',
+    description:
+      'Beautiful lash services designed around your preferred look.',
+    icon: '✧',
+  },
+  {
+    slug: 'eyebrows',
+    title: 'Brows',
+    description:
+      'Brow shaping and beauty services for a polished finish.',
+    icon: '⌁',
+  },
+  {
+    slug: 'skincare',
+    title: 'Skincare',
+    description:
+      'Personalized skincare services focused on healthy, glowing skin.',
+    icon: '○',
+  },
+  {
+    slug: 'products',
+    title: 'Products',
+    description:
+      'Shop professional salon products selected for beautiful, healthy hair and skin.',
+    icon: '◈',
+    isProductCatalog: true,
+  },
+];
+
+
+/* =========================================================
+   OUR WORK
+
+   These are placeholders for now.
+   Later we can replace these with real salon photos.
+========================================================= */
+
+const WORK_IMAGES = [
+  {
+    id: 'hair-1',
+    image:
+      'https://images.unsplash.com/photo-1562322140-8baeececf3df?auto=format&fit=crop&w=1200&q=85',
+  },
+  {
+    id: 'nails-1',
+    image:
+      'https://images.unsplash.com/photo-1604654894610-df63bc536371?auto=format&fit=crop&w=1200&q=85',
+  },
+  {
+    id: 'skin-1',
+    image:
+      'https://images.unsplash.com/photo-1570172619644-dfd03ed5d881?auto=format&fit=crop&w=1200&q=85',
+  },
+  {
+    id: 'hair-2',
+    image:
+      'https://images.unsplash.com/photo-1522337660859-02fbefca4702?auto=format&fit=crop&w=1200&q=85',
+  },
+  {
+    id: 'beauty-1',
+    image:
+      'https://images.unsplash.com/photo-1560066984-138dadb4c035?auto=format&fit=crop&w=1200&q=85',
+  },
+];
+
+
+/* =========================================================
+   PORTFOLIO TESTIMONIALS
+
+   Replace these placeholders with real client reviews.
+========================================================= */
+
+const TESTIMONIALS = [
+  {
+    id: 'review-1',
+    quote:
+      'Add a real Image & Style client review here.',
+    label:
+      'CLIENT REVIEW PLACEHOLDER',
+  },
+  {
+    id: 'review-2',
+    quote:
+      'Add another client experience here when ready.',
+    label:
+      'CLIENT REVIEW PLACEHOLDER',
+  },
+  {
+    id: 'review-3',
+    quote:
+      'Use this space for a review about the salon team.',
+    label:
+      'CLIENT REVIEW PLACEHOLDER',
+  },
+];
+
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+const pad = (number) =>
+  String(number).padStart(2, '0');
+
+
+function localToday() {
+  const date =
+    new Date();
+
+  return (
+    `${date.getFullYear()}-` +
+    `${pad(date.getMonth() + 1)}-` +
+    `${pad(date.getDate())}`
+  );
+}
+
+
+function formatMoney(value) {
+  return `$${Number(value || 0).toFixed(2)}`;
+}
+
+
+function formatTime12(value) {
+  if (!value) {
+    return '';
+  }
+
+  const [
+    hourString,
+    minuteString,
+  ] =
+    value.split(':');
+
+  const hour =
+    Number(hourString);
+
+  const minute =
+    Number(minuteString);
+
+  const suffix =
+    hour >= 12
+      ? 'PM'
+      : 'AM';
+
+  const displayHour =
+    hour % 12 || 12;
+
+  return (
+    `${displayHour}:` +
+    `${pad(minute)} ` +
+    suffix
+  );
+}
+
+
+function formatDateLong(dateString) {
+  if (!dateString) {
+    return '';
+  }
+
+  const [
+    year,
+    month,
+    day,
+  ] =
+    dateString
+      .split('-')
+      .map(Number);
+
+  const date =
+    new Date(
+      year,
+      month - 1,
+      day
+    );
+
+  return date.toLocaleDateString(
+    'en-US',
+    {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    }
+  );
+}
+
+
+function resolveAvatar(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (
+    value.startsWith('http://') ||
+    value.startsWith('https://')
+  ) {
+    return value;
+  }
+
+  if (value.startsWith('/')) {
+    return `${API_BASE_URL}${value}`;
+  }
+
+  return `${API_BASE_URL}/${value}`;
+}
+
+
+async function fetchJson(
+  url,
+  options
+) {
+  const response =
+    await fetch(
+      url,
+      options
+    );
+
+  if (!response.ok) {
+    let message =
+      'Something went wrong.';
+
+    try {
+      const data =
+        await response.json();
+
+      message =
+        data?.detail ||
+        message;
+    } catch {
+      const text =
+        await response.text();
+
+      if (text) {
+        message =
+          text;
+      }
+    }
+
+    throw new Error(message);
+  }
+
+  return response.json();
+}
+
+
+/* =========================================================
+   SMALL COMPONENTS
+========================================================= */
+
+function SectionTitle({
+  eyebrow,
+  title,
+  description,
+  light = false,
+}) {
+  return (
+    <View
+      style={{
+        alignItems: 'center',
+        marginBottom: 30,
+      }}
+    >
+      {!!eyebrow && (
+        <Text
+          style={{
+            color:
+              light
+                ? 'rgba(255,255,255,0.65)'
+                : COLORS.royalBright,
+
+            fontSize: 12,
+            fontWeight: '900',
+            letterSpacing: 2,
+            textTransform: 'uppercase',
+            marginBottom: 9,
+          }}
+        >
+          {eyebrow}
+        </Text>
+      )}
+
+      <Text
+        style={{
+          color:
+            light
+              ? COLORS.white
+              : COLORS.royalDark,
+
+          fontSize: 30,
+          lineHeight: 36,
+          fontWeight: '900',
+          textAlign: 'center',
+        }}
+      >
+        {title}
+      </Text>
+
+      {!!description && (
+        <Text
+          style={{
+            color:
+              light
+                ? 'rgba(255,255,255,0.72)'
+                : COLORS.textSecondary,
+
+            fontSize: 15,
+            lineHeight: 23,
+            textAlign: 'center',
+            maxWidth: 650,
+            marginTop: 10,
+          }}
+        >
+          {description}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+
+function FormInput({
+  label,
+  style,
+  ...props
+}) {
+  return (
+    <View
+      style={[
+        {
+          marginBottom: 14,
+        },
+        style,
+      ]}
+    >
+      <Text
+        style={{
+          color: COLORS.text,
+          fontSize: 12,
+          fontWeight: '800',
+          marginBottom: 7,
+        }}
+      >
+        {label}
+      </Text>
+
+      <TextInput
+        placeholderTextColor={
+          COLORS.textMuted
+        }
+
+        selectionColor={
+          COLORS.royal
+        }
+
+        style={{
+          minHeight: 52,
+          borderWidth: 1,
+          borderColor: COLORS.border,
+          borderRadius: RADIUS.medium,
+          backgroundColor: COLORS.white,
+          paddingHorizontal: 14,
+          color: COLORS.text,
+          fontSize: 14,
+        }}
+
+        {...props}
+      />
+    </View>
+  );
+}
+
+
+/* =========================================================
+   MAIN SCREEN
+========================================================= */
+
+export default function ClientHomeScreen({
+  onStaffLogin,
+}) {
+  const {
+    width,
+  } =
+    useWindowDimensions();
+
+  const isPhone =
+    width < 700;
+
+  const isTablet =
+    width >= 700 &&
+    width < 1100;
+
+  const pageScrollRef =
+    useRef(null);
+
+  const [
+    servicesSectionY,
+    setServicesSectionY,
+  ] =
+    useState(0);
+
+
+  const servicesSectionYRef =
+    useRef(0);
+
+  const today =
+    localToday();
+
+
+  /* =====================================================
+     BOOKING STATE
+  ===================================================== */
+
+  const [
+    selectedCategory,
+    setSelectedCategory,
+  ] =
+    useState(null);
+
+  const [
+    staff,
+    setStaff,
+  ] =
+    useState([]);
+
+  const [
+    services,
+    setServices,
+  ] =
+    useState([]);
+
+  const [
+    products,
+    setProducts,
+  ] =
+    useState([]);
+
+  const [
+    selectedStaff,
+    setSelectedStaff,
+  ] =
+    useState(null);
+
+  const [
+    selectedService,
+    setSelectedService,
+  ] =
+    useState(null);
+
+  const [
+    selectedDate,
+    setSelectedDate,
+  ] =
+    useState(today);
+
+  const [
+    selectedTime,
+    setSelectedTime,
+  ] =
+    useState(null);
+
+  const [
+    availableTimes,
+    setAvailableTimes,
+  ] =
+    useState([]);
+
+  const [
+    loadingCategory,
+    setLoadingCategory,
+  ] =
+    useState(false);
+
+  const [
+    loadingProducts,
+    setLoadingProducts,
+  ] =
+    useState(false);
+
+  const [
+    loadingAvailability,
+    setLoadingAvailability,
+  ] =
+    useState(false);
+
+  const [
+    booking,
+    setBooking,
+  ] =
+    useState(false);
+
+
+  /* =====================================================
+     CONFIRMATION
+  ===================================================== */
+
+  const [
+    bookingConfirmed,
+    setBookingConfirmed,
+  ] =
+    useState(false);
+
+  const [
+    confirmationDetails,
+    setConfirmationDetails,
+  ] =
+    useState(null);
+
+
+  const [
+    processingDepositReturn,
+    setProcessingDepositReturn,
+  ] =
+    useState(() => {
+      if (
+        typeof window === 'undefined' ||
+        !window.location?.href
+      ) {
+        return false;
+      }
+
+      try {
+        const url =
+          new URL(
+            window.location.href
+          );
+
+        return (
+          url.searchParams.get(
+            'deposit_payment'
+          ) === 'success'
+        );
+      } catch {
+        return false;
+      }
+    });
+
+
+  /* =====================================================
+     CUSTOMER INFORMATION
+  ===================================================== */
+
+  const [
+    firstName,
+    setFirstName,
+  ] =
+    useState('');
+
+  const [
+    lastName,
+    setLastName,
+  ] =
+    useState('');
+
+  const [
+    phone,
+    setPhone,
+  ] =
+    useState('');
+
+  const [
+    email,
+    setEmail,
+  ] =
+    useState('');
+
+  const [
+    notes,
+    setNotes,
+  ] =
+    useState('');
+
+
+  /* =====================================================
+     CATEGORY INFO
+  ===================================================== */
+
+  const categoryInfo =
+    useMemo(
+      () =>
+        SERVICE_CATEGORIES.find(
+          (item) =>
+            item.slug ===
+            selectedCategory
+        ) || null,
+      [
+        selectedCategory,
+      ]
+    );
+
+
+  /* =====================================================
+     SCROLL
+  ===================================================== */
+
+  const scrollToServices =
+    () => {
+      pageScrollRef.current?.scrollTo({
+        y:
+          Math.max(
+            servicesSectionY - 10,
+            0
+          ),
+
+        animated: true,
+      });
+    };
+
+
+  /* =====================================================
+     RESET BOOKING
+  ===================================================== */
+
+  const resetBooking =
+    ({
+      keepCategory = false,
+    } = {}) => {
+      setBookingConfirmed(false);
+      setConfirmationDetails(null);
+
+      setSelectedStaff(null);
+      setSelectedService(null);
+      setSelectedDate(today);
+      setSelectedTime(null);
+      setAvailableTimes([]);
+
+      setFirstName('');
+      setLastName('');
+      setPhone('');
+      setEmail('');
+      setNotes('');
+
+      if (!keepCategory) {
+        setSelectedCategory(null);
+        setStaff([]);
+        setServices([]);
+      }
+    };
+
+
+  const bookAnotherAppointment =
+    () => {
+      resetBooking({
+        keepCategory: false,
+      });
+
+      setTimeout(
+        () => {
+          scrollToServices();
+        },
+        100
+      );
+    };
+
+
+  /* =====================================================
+     OPEN CATEGORY
+  ===================================================== */
+
+  const openCategory =
+    async (
+      category
+    ) => {
+      setBookingConfirmed(false);
+      setConfirmationDetails(null);
+
+      setSelectedCategory(
+        category.slug
+      );
+
+      setSelectedStaff(null);
+      setSelectedService(null);
+      setSelectedDate(today);
+      setSelectedTime(null);
+      setAvailableTimes([]);
+
+      setProducts([]);
+
+      if (
+        category.slug ===
+        'products'
+      ) {
+        setLoadingProducts(
+          true
+        );
+
+        try {
+          const productData =
+            await fetchJson(
+              `${API_BASE_URL}/public/products`
+            );
+
+          setProducts(
+            Array.isArray(
+              productData
+            )
+              ? productData
+              : []
+          );
+        } catch (error) {
+          setProducts([]);
+
+          Alert.alert(
+            'Unable to load products',
+            String(
+              error.message ||
+              error
+            )
+          );
+        } finally {
+          setLoadingProducts(
+            false
+          );
+        }
+
+        return;
+      }
+
+
+      setLoadingCategory(
+        true
+      );
+
+      try {
+        const encoded =
+          encodeURIComponent(
+            category.slug
+          );
+
+        const [
+          staffData,
+          serviceData,
+        ] =
+          await Promise.all([
+            fetchJson(
+              `${API_BASE_URL}/public/staff?category=${encoded}`
+            ),
+
+            fetchJson(
+              `${API_BASE_URL}/public/services?category=${encoded}`
+            ),
+          ]);
+
+        setStaff(
+          Array.isArray(
+            staffData
+          )
+            ? staffData
+            : []
+        );
+
+        setServices(
+          Array.isArray(
+            serviceData
+          )
+            ? serviceData
+            : []
+        );
+      } catch (error) {
+        setStaff([]);
+        setServices([]);
+
+        Alert.alert(
+          'Unable to load',
+          String(
+            error.message ||
+            error
+          )
+        );
+      } finally {
+        setLoadingCategory(
+          false
+        );
+      }
+    };
+
+
+  /* =====================================================
+     BACK TO ALL SERVICES
+  ===================================================== */
+
+  const closeCategory =
+    () => {
+      resetBooking({
+        keepCategory: false,
+      });
+    };
+
+
+  /* =====================================================
+     SELECT PROFESSIONAL
+  ===================================================== */
+
+  const chooseStaff =
+    (
+      member
+    ) => {
+      setBookingConfirmed(false);
+      setConfirmationDetails(null);
+
+      setSelectedStaff(
+        member
+      );
+
+      setSelectedService(null);
+      setSelectedDate(today);
+      setSelectedTime(null);
+      setAvailableTimes([]);
+    };
+
+
+  /* =====================================================
+     SELECT SERVICE
+  ===================================================== */
+
+  const chooseService =
+    (
+      service
+    ) => {
+      setBookingConfirmed(false);
+      setConfirmationDetails(null);
+
+      setSelectedService(
+        service
+      );
+
+      setSelectedDate(today);
+      setSelectedTime(null);
+      setAvailableTimes([]);
+    };
+
+
+  /* =====================================================
+     STRIPE DEPOSIT RETURN
+  ===================================================== */
+
+  useEffect(() => {
+    let cancelled = false;
+
+
+    const sleep =
+      (ms) =>
+        new Promise(
+          (resolve) =>
+            setTimeout(
+              resolve,
+              ms
+            )
+        );
+
+
+    const handleDepositReturn =
+      async () => {
+        try {
+          let returnUrl = null;
+
+
+          /*
+           * Website return from Stripe.
+           */
+          if (
+            typeof window !== 'undefined' &&
+            window.location?.href
+          ) {
+            returnUrl =
+              window.location.href;
+          }
+
+
+          /*
+           * Native/deep-link fallback.
+           */
+          if (!returnUrl) {
+            returnUrl =
+              await Linking.getInitialURL();
+          }
+
+
+          if (!returnUrl) {
+            return;
+          }
+
+
+          const url =
+            new URL(
+              returnUrl
+            );
+
+
+          const depositResult =
+            url.searchParams.get(
+              'deposit_payment'
+            );
+
+
+          if (!depositResult) {
+            return;
+          }
+
+
+          const appointmentId =
+            url.searchParams.get(
+              'appointment_id'
+            );
+
+          const bookingToken =
+            url.searchParams.get(
+              'booking_token'
+            );
+
+
+          if (
+            depositResult ===
+            'cancelled'
+          ) {
+            if (!cancelled) {
+              Alert.alert(
+                'Deposit not completed',
+                'Your appointment has not been confirmed. Please choose your appointment again.'
+              );
+            }
+
+            return;
+          }
+
+
+          if (
+            depositResult !==
+            'success'
+          ) {
+            return;
+          }
+
+
+          if (
+            !appointmentId ||
+            !bookingToken
+          ) {
+            throw new Error(
+              'Missing booking confirmation information.'
+            );
+          }
+
+
+          if (!cancelled) {
+            setBooking(true);
+          }
+
+
+          let bookingData = null;
+
+
+          /*
+           * Stripe may redirect the customer a fraction
+           * of a second before our webhook finishes.
+           *
+           * Check a few times before deciding the booking
+           * is still pending.
+           */
+          for (
+            let attempt = 0;
+            attempt < 8;
+            attempt += 1
+          ) {
+            const params =
+              new URLSearchParams();
+
+            params.set(
+              'appointment_id',
+              appointmentId
+            );
+
+            params.set(
+              'booking_token',
+              bookingToken
+            );
+
+
+            bookingData =
+              await fetchJson(
+                `${API_BASE_URL}/public/booking-status?${params.toString()}`
+              );
+
+
+            if (
+              bookingData
+                ?.booking_status ===
+              'confirmed'
+            ) {
+              break;
+            }
+
+
+            await sleep(500);
+          }
+
+
+          if (cancelled) {
+            return;
+          }
+
+
+          if (
+            bookingData
+              ?.booking_status !==
+            'confirmed'
+          ) {
+            throw new Error(
+              'Your payment was received, but the booking confirmation is still processing. Please refresh in a moment.'
+            );
+          }
+
+
+          const start =
+            bookingData?.start_time
+              ? new Date(
+                  bookingData.start_time
+                )
+              : null;
+
+          const end =
+            bookingData?.end_time
+              ? new Date(
+                  bookingData.end_time
+                )
+              : null;
+
+
+          const date =
+            bookingData?.start_time
+              ? bookingData
+                  .start_time
+                  .slice(
+                    0,
+                    10
+                  )
+              : '';
+
+
+          const time =
+            bookingData?.start_time
+              ? bookingData
+                  .start_time
+                  .slice(
+                    11,
+                    16
+                  )
+              : '';
+
+
+          let duration = 0;
+
+
+          if (
+            start &&
+            end &&
+            !Number.isNaN(
+              start.getTime()
+            ) &&
+            !Number.isNaN(
+              end.getTime()
+            )
+          ) {
+            duration =
+              Math.max(
+                0,
+                Math.round(
+                  (
+                    end.getTime() -
+                    start.getTime()
+                  ) /
+                  60000
+                )
+              );
+          }
+
+
+          setConfirmationDetails({
+            appointmentId:
+              bookingData
+                ?.appointment_id,
+
+            customerName:
+              bookingData
+                ?.client_name,
+
+            staffName:
+              bookingData
+                ?.staff_name,
+
+            serviceName:
+              bookingData
+                ?.service_name,
+
+            date,
+
+            time,
+
+            duration,
+
+            price:
+              bookingData
+                ?.service_price,
+
+            depositAmount:
+              bookingData
+                ?.deposit_amount,
+
+            paidTotal:
+              bookingData
+                ?.paid_total,
+
+            remainingBalance:
+              bookingData
+                ?.remaining_balance,
+
+            bookingToken,
+          });
+
+
+          setBookingConfirmed(
+            true
+          );
+
+
+          /*
+           * Remove Stripe query parameters so refreshing
+           * the page does not process the payment again.
+           */
+          if (
+            typeof window !==
+              'undefined' &&
+            window.history
+              ?.replaceState
+          ) {
+            window.history.replaceState(
+              {},
+              '',
+              window.location.pathname
+            );
+          }
+
+
+          const scrollToConfirmation =
+            () => {
+              const targetY =
+                servicesSectionYRef.current;
+
+              if (
+                !targetY ||
+                targetY <= 0
+              ) {
+                setTimeout(
+                  scrollToConfirmation,
+                  100
+                );
+
+                return;
+              }
+
+
+              pageScrollRef
+                .current
+                ?.scrollTo({
+                  y: Math.max(
+                    targetY - 10,
+                    0
+                  ),
+                  animated: false,
+                });
+
+
+              setTimeout(() => {
+                if (!cancelled) {
+                  setProcessingDepositReturn(
+                    false
+                  );
+                }
+              }, 150);
+            };
+
+
+          setTimeout(
+            scrollToConfirmation,
+            100
+          );
+
+
+        } catch (error) {
+          if (!cancelled) {
+            setProcessingDepositReturn(
+              false
+            );
+
+            Alert.alert(
+              'Booking confirmation',
+              String(
+                error?.message ||
+                error
+              )
+            );
+          }
+
+        } finally {
+          if (!cancelled) {
+            setBooking(false);
+          }
+        }
+      };
+
+
+    handleDepositReturn();
+
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+
+  /* =====================================================
+     LOAD REAL AVAILABILITY
+  ===================================================== */
+
+  useEffect(
+    () => {
+      let cancelled =
+        false;
+
+      const load =
+        async () => {
+          if (
+            bookingConfirmed ||
+            !selectedStaff?.id ||
+            !selectedService?.id ||
+            !selectedDate
+          ) {
+            return;
+          }
+
+          setLoadingAvailability(true);
+          setSelectedTime(null);
+
+          try {
+            const url =
+              `${API_BASE_URL}` +
+              `/public/availability` +
+              `?staff_id=${encodeURIComponent(
+                selectedStaff.id
+              )}` +
+              `&date=${encodeURIComponent(
+                selectedDate
+              )}` +
+              `&service_id=${encodeURIComponent(
+                selectedService.id
+              )}`;
+
+            const data =
+              await fetchJson(url);
+
+            if (!cancelled) {
+              setAvailableTimes(
+                Array.isArray(
+                  data?.available
+                )
+                  ? data.available
+                  : []
+              );
+            }
+          } catch (error) {
+            if (!cancelled) {
+              setAvailableTimes([]);
+
+              Alert.alert(
+                'Availability error',
+                String(
+                  error.message ||
+                  error
+                )
+              );
+            }
+          } finally {
+            if (!cancelled) {
+              setLoadingAvailability(
+                false
+              );
+            }
+          }
+        };
+
+      load();
+
+      return () => {
+        cancelled =
+          true;
+      };
+    },
+    [
+      selectedStaff?.id,
+      selectedService?.id,
+      selectedDate,
+      bookingConfirmed,
+    ]
+  );
+
+
+  /* =====================================================
+     SUBMIT APPOINTMENT
+  ===================================================== */
+
+  const submitBooking =
+    async () => {
+      if (
+        !selectedStaff ||
+        !selectedService ||
+        !selectedDate ||
+        !selectedTime
+      ) {
+        return Alert.alert(
+          'Choose your appointment',
+          'Select your professional, service, date and time.'
+        );
+      }
+
+      if (
+        !firstName.trim() ||
+        !lastName.trim()
+      ) {
+        return Alert.alert(
+          'Your information',
+          'Enter your first and last name.'
+        );
+      }
+
+      if (booking) {
+        return;
+      }
+
+      setBooking(true);
+
+      try {
+        const params =
+          new URLSearchParams();
+
+        params.set(
+          'staff_id',
+          String(
+            selectedStaff.id
+          )
+        );
+
+        params.set(
+          'date',
+          selectedDate
+        );
+
+        params.set(
+          'time',
+          selectedTime
+        );
+
+        params.set(
+          'service_id',
+          String(
+            selectedService.id
+          )
+        );
+
+        params.set(
+          'client_first_name',
+          firstName.trim()
+        );
+
+        params.set(
+          'client_last_name',
+          lastName.trim()
+        );
+
+        if (phone.trim()) {
+          params.set(
+            'client_phone',
+            phone.trim()
+          );
+        }
+
+        if (email.trim()) {
+          params.set(
+            'client_email',
+            email
+              .trim()
+              .toLowerCase()
+          );
+        }
+
+        if (notes.trim()) {
+          params.set(
+            'notes',
+            notes.trim()
+          );
+        }
+
+
+        /* -----------------------------------------------
+           RECHECK AVAILABILITY BEFORE SAVING
+        ----------------------------------------------- */
+
+        const latestAvailabilityUrl =
+          `${API_BASE_URL}` +
+          `/public/availability` +
+          `?staff_id=${encodeURIComponent(
+            selectedStaff.id
+          )}` +
+          `&date=${encodeURIComponent(
+            selectedDate
+          )}` +
+          `&service_id=${encodeURIComponent(
+            selectedService.id
+          )}`;
+
+
+        const latestAvailability =
+          await fetchJson(
+            latestAvailabilityUrl
+          );
+
+
+        const latestTimes =
+          Array.isArray(
+            latestAvailability?.available
+          )
+            ? latestAvailability.available
+            : [];
+
+
+        setAvailableTimes(
+          latestTimes
+        );
+
+
+        if (
+          !latestTimes.includes(
+            selectedTime
+          )
+        ) {
+          setSelectedTime(
+            null
+          );
+
+          Alert.alert(
+            'Time no longer available',
+            'Another appointment already occupies that time. Please choose a different available time.'
+          );
+
+          return;
+        }
+
+
+        /* -----------------------------------------------
+           SAVE APPOINTMENT
+        ----------------------------------------------- */
+
+        const result =
+          await fetchJson(
+            `${API_BASE_URL}/public/appointments?${params.toString()}`,
+            {
+              method: 'POST',
+            }
+          );
+
+
+        /*
+         * The appointment now exists as pending_deposit.
+         *
+         * Next, create the Stripe deposit checkout using
+         * the secure booking token returned by the backend.
+         */
+
+        const depositParams =
+          new URLSearchParams();
+
+        depositParams.set(
+          'appointment_id',
+          String(
+            result?.appointment_id
+          )
+        );
+
+        depositParams.set(
+          'booking_token',
+          String(
+            result?.booking_token
+          )
+        );
+
+
+        const checkout =
+          await fetchJson(
+            `${API_BASE_URL}/payments/public-deposit-checkout?${depositParams.toString()}`,
+            {
+              method: 'POST',
+            }
+          );
+
+
+        if (!checkout?.url) {
+          throw new Error(
+            'Stripe checkout URL was not returned.'
+          );
+        }
+
+
+        /*
+         * Save the booking snapshot before leaving
+         * the website for Stripe Checkout.
+         */
+
+        setConfirmationDetails({
+          appointmentId:
+            result?.appointment_id,
+
+          customerName:
+            `${firstName.trim()} ${lastName.trim()}`,
+
+          staffName:
+            selectedStaff.name,
+
+          serviceName:
+            selectedService.name,
+
+          date:
+            selectedDate,
+
+          time:
+            selectedTime,
+
+          duration:
+            selectedService.duration_minutes,
+
+          price:
+            selectedService.price,
+
+          depositAmount:
+            result?.deposit_amount,
+
+          bookingToken:
+            result?.booking_token,
+        });
+
+
+        /*
+         * Do NOT mark the booking confirmed here.
+         *
+         * The Stripe webhook will confirm it only
+         * after the deposit is actually paid.
+         */
+
+        setBookingConfirmed(false);
+
+
+        if (
+          typeof window !== 'undefined'
+        ) {
+          window.location.href =
+            checkout.url;
+
+          return;
+        }
+
+
+        await Linking.openURL(
+          checkout.url
+        );
+
+      } catch (error) {
+        const message =
+          String(
+            error.message ||
+            error
+          );
+
+
+        if (
+          message
+            .toLowerCase()
+            .includes(
+              'time unavailable'
+            )
+        ) {
+          setSelectedTime(
+            null
+          );
+
+          try {
+            const refreshed =
+              await fetchJson(
+                `${API_BASE_URL}` +
+                `/public/availability` +
+                `?staff_id=${encodeURIComponent(
+                  selectedStaff.id
+                )}` +
+                `&date=${encodeURIComponent(
+                  selectedDate
+                )}` +
+                `&service_id=${encodeURIComponent(
+                  selectedService.id
+                )}`
+              );
+
+            setAvailableTimes(
+              Array.isArray(
+                refreshed?.available
+              )
+                ? refreshed.available
+                : []
+            );
+          } catch {
+            setAvailableTimes(
+              []
+            );
+          }
+
+
+          Alert.alert(
+            'Time no longer available',
+            'That time was just taken. Please choose another available time.'
+          );
+        } else {
+          Alert.alert(
+            'Booking failed',
+            message
+          );
+        }
+      } finally {
+        setBooking(false);
+      }
+    };
+
+
+  /* =====================================================
+     FOOTER ACTIONS
+  ===================================================== */
+
+  const openPhone =
+    () => {
+      Linking.openURL(
+        'tel:+13050000000'
+      );
+    };
+
+
+  const openInstagram =
+    () => {
+      Linking.openURL(
+        'https://www.instagram.com/'
+      );
+    };
+
+
+  /* =====================================================
+     RENDER
+  ===================================================== */
+
+  return (
+    <SafeAreaView
+      edges={[
+        'top',
+      ]}
+
+      style={{
+        flex: 1,
+        backgroundColor:
+          COLORS.white,
+      }}
+    >
+      <StatusBar
+        style="dark"
+      />
+
+
+      {processingDepositReturn && (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+
+            zIndex: 9999,
+
+            backgroundColor:
+              COLORS.white,
+
+            alignItems:
+              'center',
+
+            justifyContent:
+              'center',
+
+            paddingHorizontal:
+              24,
+          }}
+        >
+          <ActivityIndicator
+            size="large"
+            color={
+              COLORS.royal
+            }
+          />
+
+          <Text
+            style={{
+              color:
+                COLORS.royalDark,
+
+              fontSize: 24,
+
+              fontWeight:
+                '900',
+
+              textAlign:
+                'center',
+
+              marginTop: 24,
+            }}
+          >
+            Confirming your appointment...
+          </Text>
+
+          <Text
+            style={{
+              color:
+                COLORS.textSecondary,
+
+              fontSize: 14,
+
+              lineHeight: 22,
+
+              textAlign:
+                'center',
+
+              marginTop: 10,
+
+              maxWidth: 420,
+            }}
+          >
+            Your deposit was received. We're finishing your booking now.
+          </Text>
+        </View>
+      )}
+
+
+      <ScrollView
+        ref={
+          pageScrollRef
+        }
+
+        showsVerticalScrollIndicator={
+          false
+        }
+
+        keyboardShouldPersistTaps="handled"
+
+        contentContainerStyle={{
+          backgroundColor:
+            COLORS.white,
+        }}
+      >
+
+        {/* =================================================
+            NAVBAR
+        ================================================= */}
+
+        <View
+          style={{
+            backgroundColor:
+              COLORS.white,
+
+            borderBottomWidth:
+              1,
+
+            borderBottomColor:
+              COLORS.border,
+
+            paddingHorizontal:
+              isPhone
+                ? 16
+                : 32,
+
+            paddingVertical:
+              12,
+          }}
+        >
+          <View
+            style={{
+              width: '100%',
+              maxWidth: 1200,
+              alignSelf: 'center',
+
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent:
+                'space-between',
+            }}
+          >
+
+            {/* BRAND */}
+
+            <View
+              style={{
+                flexDirection:
+                  'row',
+
+                alignItems:
+                  'center',
+
+                flex: 1,
+              }}
+            >
+              <Image
+                source={
+                  BRAND_LOGO
+                }
+
+                resizeMode="cover"
+
+                style={{
+                  width:
+                    isPhone
+                      ? 43
+                      : 54,
+
+                  height:
+                    isPhone
+                      ? 43
+                      : 54,
+
+                  borderRadius:
+                    30,
+                }}
+              />
+
+              <View
+                style={{
+                  marginLeft: 9,
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      COLORS.royalDark,
+
+                    fontSize:
+                      isPhone
+                        ? 16
+                        : 20,
+
+                    fontWeight:
+                      '900',
+                  }}
+                >
+                  Image & Style
+                </Text>
+
+                {!isPhone && (
+                  <Text
+                    style={{
+                      color:
+                        COLORS.textMuted,
+
+                      fontSize: 10,
+                      marginTop: 2,
+                      letterSpacing:
+                        1.3,
+                    }}
+                  >
+                    BEAUTY SALON
+                  </Text>
+                )}
+              </View>
+            </View>
+
+
+            {/* NAV BUTTONS */}
+
+            <View
+              style={{
+                flexDirection:
+                  'row',
+
+                alignItems:
+                  'center',
+
+                gap:
+                  isPhone
+                    ? 5
+                    : 10,
+              }}
+            >
+              <TouchableOpacity
+                activeOpacity={
+                  0.7
+                }
+
+                onPress={
+                  onStaffLogin
+                }
+
+                style={{
+                  paddingHorizontal:
+                    isPhone
+                      ? 8
+                      : 13,
+
+                  paddingVertical:
+                    10,
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      COLORS.textSecondary,
+
+                    fontSize:
+                      isPhone
+                        ? 10
+                        : 13,
+
+                    fontWeight:
+                      '700',
+                  }}
+                >
+                  Staff Login
+                </Text>
+              </TouchableOpacity>
+
+
+              <TouchableOpacity
+                activeOpacity={
+                  0.85
+                }
+
+                onPress={
+                  scrollToServices
+                }
+
+                style={{
+                  backgroundColor:
+                    COLORS.royal,
+
+                  paddingHorizontal:
+                    isPhone
+                      ? 12
+                      : 20,
+
+                  paddingVertical:
+                    11,
+
+                  borderRadius:
+                    RADIUS.round,
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      COLORS.white,
+
+                    fontSize:
+                      isPhone
+                        ? 10
+                        : 13,
+
+                    fontWeight:
+                      '900',
+                  }}
+                >
+                  Book Now
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+
+
+        {/* =================================================
+            HERO
+        ================================================= */}
+
+        <View
+          style={{
+            backgroundColor:
+              '#f7f1e8',
+
+            paddingHorizontal:
+              isPhone
+                ? 20
+                : 40,
+
+            paddingVertical:
+              isPhone
+                ? 48
+                : 82,
+          }}
+        >
+          <View
+            style={{
+              width: '100%',
+              maxWidth: 1200,
+              alignSelf: 'center',
+
+              flexDirection:
+                isPhone
+                  ? 'column'
+                  : 'row',
+
+              alignItems:
+                'center',
+
+              gap:
+                isPhone
+                  ? 36
+                  : 60,
+            }}
+          >
+
+            {/* HERO TEXT */}
+
+            <View
+              style={{
+                flex: 1,
+
+                alignItems:
+                  isPhone
+                    ? 'center'
+                    : 'flex-start',
+              }}
+            >
+              <View
+                style={{
+                  backgroundColor:
+                    COLORS.blueSoft,
+
+                  borderRadius:
+                    RADIUS.round,
+
+                  paddingHorizontal:
+                    14,
+
+                  paddingVertical:
+                    7,
+
+                  marginBottom:
+                    18,
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      COLORS.royal,
+
+                    fontSize: 11,
+
+                    fontWeight:
+                      '900',
+
+                    letterSpacing:
+                      1.4,
+                  }}
+                >
+                  BEAUTY • STYLE • CONFIDENCE
+                </Text>
+              </View>
+
+
+              <Text
+                style={{
+                  color:
+                    COLORS.royalDark,
+
+                  fontSize:
+                    isPhone
+                      ? 39
+                      : isTablet
+                      ? 48
+                      : 60,
+
+                  lineHeight:
+                    isPhone
+                      ? 45
+                      : isTablet
+                      ? 55
+                      : 67,
+
+                  fontWeight:
+                    '900',
+
+                  textAlign:
+                    isPhone
+                      ? 'center'
+                      : 'left',
+
+                  maxWidth:
+                    650,
+                }}
+              >
+                Your beauty.
+                {'\n'}
+                Your style.
+                {'\n'}
+                Your moment.
+              </Text>
+
+
+              <Text
+                style={{
+                  color:
+                    COLORS.textSecondary,
+
+                  fontSize:
+                    isPhone
+                      ? 15
+                      : 17,
+
+                  lineHeight:
+                    isPhone
+                      ? 23
+                      : 26,
+
+                  marginTop:
+                    20,
+
+                  maxWidth:
+                    560,
+
+                  textAlign:
+                    isPhone
+                      ? 'center'
+                      : 'left',
+                }}
+              >
+                Discover professional beauty services
+                designed around you at Image & Style.
+              </Text>
+
+
+              <TouchableOpacity
+                activeOpacity={
+                  0.85
+                }
+
+                onPress={
+                  scrollToServices
+                }
+
+                style={{
+                  minHeight: 56,
+
+                  paddingHorizontal:
+                    28,
+
+                  borderRadius:
+                    RADIUS.round,
+
+                  backgroundColor:
+                    COLORS.royal,
+
+                  alignItems:
+                    'center',
+
+                  justifyContent:
+                    'center',
+
+                  marginTop: 26,
+
+                  alignSelf:
+                    isPhone
+                      ? 'stretch'
+                      : 'flex-start',
+
+                  ...SHADOWS.card,
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      COLORS.white,
+
+                    fontSize: 14,
+
+                    fontWeight:
+                      '900',
+
+                    textAlign:
+                      'center',
+                  }}
+                >
+                  Book Your Appointment
+                </Text>
+              </TouchableOpacity>
+
+
+              {/* CHOOSE / BOOK / ENJOY */}
+
+              <View
+                style={{
+                  width: '100%',
+
+                  flexDirection:
+                    isPhone
+                      ? 'column'
+                      : 'row',
+
+                  gap: 10,
+
+                  marginTop:
+                    28,
+                }}
+              >
+                {[
+                  [
+                    '01',
+                    'Choose',
+                    'Pick the beauty service you want.',
+                  ],
+                  [
+                    '02',
+                    'Book',
+                    'Choose your professional and time.',
+                  ],
+                  [
+                    '03',
+                    'Enjoy',
+                    'Arrive, relax and enjoy your visit.',
+                  ],
+                ].map(
+                  (
+                    item
+                  ) => (
+                    <TouchableOpacity
+                      key={
+                        item[0]
+                      }
+
+                      activeOpacity={
+                        0.85
+                      }
+
+                      onPress={
+                        item[0] ===
+                        '01'
+                          ? scrollToServices
+                          : undefined
+                      }
+
+                      style={{
+                        flex:
+                          isPhone
+                            ? undefined
+                            : 1,
+
+                        minHeight:
+                          112,
+
+                        backgroundColor:
+                          COLORS.white,
+
+                        borderWidth: 1,
+
+                        borderColor:
+                          COLORS.border,
+
+                        borderRadius:
+                          RADIUS.large,
+
+                        padding: 15,
+
+                        ...SHADOWS.card,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royalBright,
+
+                          fontSize: 10,
+
+                          fontWeight:
+                            '900',
+                        }}
+                      >
+                        {item[0]}
+                      </Text>
+
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royalDark,
+
+                          fontSize: 16,
+
+                          fontWeight:
+                            '900',
+
+                          marginTop: 6,
+                        }}
+                      >
+                        {item[1]}
+                      </Text>
+
+                      <Text
+                        style={{
+                          color:
+                            COLORS.textSecondary,
+
+                          fontSize: 11,
+
+                          lineHeight: 16,
+
+                          marginTop: 4,
+                        }}
+                      >
+                        {item[2]}
+                      </Text>
+                    </TouchableOpacity>
+                  )
+                )}
+              </View>
+            </View>
+
+
+            {/* HERO LOGO */}
+
+            <View
+              style={{
+                width:
+                  isPhone
+                    ? '100%'
+                    : 380,
+
+                maxWidth:
+                  420,
+
+                backgroundColor:
+                  COLORS.royal,
+
+                borderRadius:
+                  35,
+
+                minHeight:
+                  isPhone
+                    ? 315
+                    : 440,
+
+                alignItems:
+                  'center',
+
+                justifyContent:
+                  'center',
+
+                padding: 35,
+
+                ...SHADOWS.floating,
+              }}
+            >
+              <View
+                style={{
+                  width:
+                    isPhone
+                      ? 185
+                      : 240,
+
+                  height:
+                    isPhone
+                      ? 185
+                      : 240,
+
+                  borderRadius:
+                    140,
+
+                  backgroundColor:
+                    COLORS.white,
+
+                  overflow:
+                    'hidden',
+                }}
+              >
+                <Image
+                  source={
+                    BRAND_LOGO
+                  }
+
+                  resizeMode="cover"
+
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                  }}
+                />
+              </View>
+
+              <Text
+                style={{
+                  color:
+                    COLORS.white,
+
+                  fontSize: 21,
+
+                  fontWeight:
+                    '900',
+
+                  marginTop:
+                    25,
+                }}
+              >
+                Image & Style
+              </Text>
+
+              <Text
+                style={{
+                  color:
+                    'rgba(255,255,255,0.7)',
+
+                  fontSize: 12,
+
+                  marginTop: 5,
+
+                  letterSpacing:
+                    1.5,
+                }}
+              >
+                BEAUTY SALON
+              </Text>
+            </View>
+          </View>
+        </View>
+
+
+        {/* =================================================
+            SERVICES / BOOKING
+        ================================================= */}
+
+        <View
+          onLayout={
+            (
+              event
+            ) => {
+              const nextY =
+                event
+                  .nativeEvent
+                  .layout
+                  .y;
+
+              setServicesSectionY(
+                nextY
+              );
+
+              servicesSectionYRef.current =
+                nextY;
+            }
+          }
+
+          style={{
+            paddingHorizontal:
+              isPhone
+                ? 20
+                : 40,
+
+            paddingVertical:
+              isPhone
+                ? 60
+                : 90,
+
+            backgroundColor:
+              COLORS.white,
+          }}
+        >
+          <View
+            style={{
+              width: '100%',
+              maxWidth: 1200,
+              alignSelf: 'center',
+            }}
+          >
+
+            {/* =============================================
+                CONFIRMATION SCREEN
+            ============================================= */}
+
+            {bookingConfirmed &&
+            confirmationDetails ? (
+              <View
+                style={{
+                  maxWidth: 720,
+                  width: '100%',
+                  alignSelf: 'center',
+                }}
+              >
+                <View
+                  style={{
+                    backgroundColor:
+                      COLORS.white,
+
+                    borderWidth: 1,
+
+                    borderColor:
+                      COLORS.border,
+
+                    borderRadius:
+                      isPhone
+                        ? 26
+                        : 34,
+
+                    padding:
+                      isPhone
+                        ? 24
+                        : 42,
+
+                    alignItems:
+                      'center',
+
+                    ...SHADOWS.card,
+                  }}
+                >
+                  {/* CHECK */}
+
+                  <View
+                    style={{
+                      width: 78,
+                      height: 78,
+
+                      borderRadius:
+                        39,
+
+                      backgroundColor:
+                        COLORS.successSoft,
+
+                      alignItems:
+                        'center',
+
+                      justifyContent:
+                        'center',
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.success,
+
+                        fontSize: 38,
+
+                        fontWeight:
+                          '900',
+                      }}
+                    >
+                      ✓
+                    </Text>
+                  </View>
+
+
+                  <Text
+                    style={{
+                      color:
+                        COLORS.royalBright,
+
+                      fontSize: 11,
+
+                      fontWeight:
+                        '900',
+
+                      letterSpacing:
+                        1.8,
+
+                      marginTop: 24,
+                    }}
+                  >
+                    THANK YOU
+                  </Text>
+
+
+                  <Text
+                    style={{
+                      color:
+                        COLORS.royalDark,
+
+                      fontSize:
+                        isPhone
+                          ? 28
+                          : 34,
+
+                      lineHeight:
+                        isPhone
+                          ? 34
+                          : 41,
+
+                      fontWeight:
+                        '900',
+
+                      textAlign:
+                        'center',
+
+                      marginTop: 8,
+                    }}
+                  >
+                    Your appointment has been confirmed.
+                  </Text>
+
+
+                  <Text
+                    style={{
+                      color:
+                        COLORS.textSecondary,
+
+                      fontSize: 14,
+
+                      lineHeight: 22,
+
+                      textAlign:
+                        'center',
+
+                      marginTop: 12,
+
+                      maxWidth: 500,
+                    }}
+                  >
+                    We look forward to seeing you at Image & Style.
+                  </Text>
+
+
+                  {/* APPOINTMENT SUMMARY */}
+
+                  <View
+                    style={{
+                      width: '100%',
+
+                      backgroundColor:
+                        COLORS.blueVerySoft,
+
+                      borderRadius:
+                        RADIUS.large,
+
+                      padding:
+                        isPhone
+                          ? 18
+                          : 24,
+
+                      marginTop: 28,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize: 10,
+
+                        fontWeight:
+                          '900',
+
+                        letterSpacing:
+                          1.3,
+                      }}
+                    >
+                      APPOINTMENT DETAILS
+                    </Text>
+                    <Text
+                      style={{
+                        color:
+                          COLORS.royalDark,
+
+                        fontSize: 22,
+
+                        fontWeight:
+                          '900',
+
+                        marginTop: 10,
+                      }}
+                    >
+                      {
+                        confirmationDetails
+                          .serviceName
+                      }
+                    </Text>
+
+
+                    <View
+                      style={{
+                        marginTop: 18,
+                        gap: 12,
+                      }}
+                    >
+                      <View>
+                        <Text
+                          style={{
+                            color:
+                              COLORS.textMuted,
+
+                            fontSize: 10,
+
+                            fontWeight:
+                              '800',
+                          }}
+                        >
+                          PROFESSIONAL
+                        </Text>
+
+                        <Text
+                          style={{
+                            color:
+                              COLORS.text,
+
+                            fontSize: 14,
+
+                            fontWeight:
+                              '800',
+
+                            marginTop: 3,
+                          }}
+                        >
+                          {
+                            confirmationDetails
+                              .staffName
+                          }
+                        </Text>
+                      </View>
+
+
+                      <View>
+                        <Text
+                          style={{
+                            color:
+                              COLORS.textMuted,
+
+                            fontSize: 10,
+
+                            fontWeight:
+                              '800',
+                          }}
+                        >
+                          DATE
+                        </Text>
+
+                        <Text
+                          style={{
+                            color:
+                              COLORS.text,
+
+                            fontSize: 14,
+
+                            fontWeight:
+                              '800',
+
+                            marginTop: 3,
+                          }}
+                        >
+                          {
+                            formatDateLong(
+                              confirmationDetails
+                                .date
+                            )
+                          }
+                        </Text>
+                      </View>
+
+
+                      <View>
+                        <Text
+                          style={{
+                            color:
+                              COLORS.textMuted,
+
+                            fontSize: 10,
+
+                            fontWeight:
+                              '800',
+                          }}
+                        >
+                          TIME
+                        </Text>
+
+                        <Text
+                          style={{
+                            color:
+                              COLORS.text,
+
+                            fontSize: 14,
+
+                            fontWeight:
+                              '800',
+
+                            marginTop: 3,
+                          }}
+                        >
+                          {
+                            formatTime12(
+                              confirmationDetails
+                                .time
+                            )
+                          }
+                        </Text>
+                      </View>
+
+
+                      <View
+                        style={{
+                          flexDirection:
+                            'row',
+
+                          justifyContent:
+                            'space-between',
+
+                          gap: 20,
+                        }}
+                      >
+                        <View>
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textMuted,
+
+                              fontSize: 10,
+
+                              fontWeight:
+                                '800',
+                            }}
+                          >
+                            DURATION
+                          </Text>
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.text,
+
+                              fontSize: 14,
+
+                              fontWeight:
+                                '800',
+
+                              marginTop: 3,
+                            }}
+                          >
+                            {
+                              confirmationDetails
+                                .duration
+                            } minutes
+                          </Text>
+                        </View>
+
+
+                        <View
+                          style={{
+                            alignItems:
+                              'flex-end',
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textMuted,
+
+                              fontSize: 10,
+
+                              fontWeight:
+                                '800',
+                            }}
+                          >
+                            PRICE
+                          </Text>
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.royal,
+
+                              fontSize: 17,
+
+                              fontWeight:
+                                '900',
+
+                              marginTop: 3,
+                            }}
+                          >
+                            {
+                              formatMoney(
+                                confirmationDetails
+                                  .price
+                              )
+                            }
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                  </View>
+
+
+                  {/* CONFIRMATION BUTTONS */}
+
+                  <View
+                    style={{
+                      width: '100%',
+
+                      flexDirection:
+                        isPhone
+                          ? 'column'
+                          : 'row',
+
+                      gap: 10,
+
+                      marginTop: 22,
+                    }}
+                  >
+                    <TouchableOpacity
+                      activeOpacity={
+                        0.85
+                      }
+
+                      onPress={
+                        bookAnotherAppointment
+                      }
+
+                      style={{
+                        flex: 1,
+
+                        minHeight: 54,
+
+                        backgroundColor:
+                          COLORS.royal,
+
+                        borderRadius:
+                          RADIUS.round,
+
+                        alignItems:
+                          'center',
+
+                        justifyContent:
+                          'center',
+
+                        paddingHorizontal:
+                          18,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.white,
+
+                          fontSize: 13,
+
+                          fontWeight:
+                            '900',
+                        }}
+                      >
+                        Book Another Appointment
+                      </Text>
+                    </TouchableOpacity>
+
+
+                    <TouchableOpacity
+                      activeOpacity={
+                        0.8
+                      }
+
+                      onPress={() => {
+                        resetBooking({
+                          keepCategory:
+                            false,
+                        });
+
+                        setTimeout(
+                          scrollToServices,
+                          100
+                        );
+                      }}
+
+                      style={{
+                        flex: 1,
+
+                        minHeight: 54,
+
+                        backgroundColor:
+                          COLORS.white,
+
+                        borderWidth: 1,
+
+                        borderColor:
+                          COLORS.borderStrong,
+
+                        borderRadius:
+                          RADIUS.round,
+
+                        alignItems:
+                          'center',
+
+                        justifyContent:
+                          'center',
+
+                        paddingHorizontal:
+                          18,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royal,
+
+                          fontSize: 13,
+
+                          fontWeight:
+                            '900',
+                        }}
+                      >
+                        Back to Services
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            ) : (
+              <>
+
+                {/* =========================================
+                    NORMAL SERVICE SELECTION
+                ========================================= */}
+
+                <SectionTitle
+                  eyebrow="Book Your Visit"
+
+                  title={
+                    categoryInfo
+                      ? categoryInfo.title
+                      : 'Book your next appointment'
+                  }
+
+                  description={
+                    categoryInfo
+                      ? categoryInfo.description
+                      : 'Choose a service, professional, date, and time. Online bookings are secured with a 25% deposit.'
+                  }
+                />
+
+
+                {/* ALL CATEGORIES */}
+
+                {!selectedCategory && (
+                  <View
+                    style={{
+                      flexDirection:
+                        'row',
+
+                      flexWrap:
+                        'wrap',
+
+                      gap: 15,
+                    }}
+                  >
+                    {SERVICE_CATEGORIES.map(
+                      (
+                        service
+                      ) => (
+                        <TouchableOpacity
+                          key={
+                            service.slug
+                          }
+
+                          activeOpacity={
+                            0.85
+                          }
+
+                          onPress={() =>
+                            openCategory(
+                              service
+                            )
+                          }
+
+                          style={{
+                            width:
+                              isPhone
+                                ? '100%'
+                                : isTablet
+                                ? '48%'
+                                : '31.8%',
+
+                            backgroundColor:
+                              COLORS.white,
+
+                            borderWidth: 1,
+
+                            borderColor:
+                              COLORS.border,
+
+                            borderRadius:
+                              RADIUS.large,
+
+                            padding: 22,
+
+                            ...SHADOWS.card,
+                          }}
+                        >
+                          <View
+                            style={{
+                              width: 48,
+                              height: 48,
+
+                              borderRadius:
+                                15,
+
+                              backgroundColor:
+                                COLORS.blueSoft,
+
+                              alignItems:
+                                'center',
+
+                              justifyContent:
+                                'center',
+
+                              marginBottom:
+                                17,
+                            }}
+                          >
+                            <Text
+                              style={{
+                                color:
+                                  COLORS.royal,
+
+                                fontSize:
+                                  23,
+
+                                fontWeight:
+                                  '900',
+                              }}
+                            >
+                              {
+                                service.icon
+                              }
+                            </Text>
+                          </View>
+
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.royalDark,
+
+                              fontSize:
+                                19,
+
+                              fontWeight:
+                                '900',
+                            }}
+                          >
+                            {
+                              service.title
+                            }
+                          </Text>
+
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textSecondary,
+
+                              fontSize:
+                                13,
+
+                              lineHeight:
+                                20,
+
+                              marginTop:
+                                8,
+                            }}
+                          >
+                            {
+                              service.description
+                            }
+                          </Text>
+
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.royal,
+
+                              fontSize:
+                                12,
+
+                              fontWeight:
+                                '900',
+
+                              marginTop:
+                                18,
+                            }}
+                          >
+                            {
+                              service.slug ===
+                              'products'
+                                ? 'View products →'
+                                : 'Choose service →'
+                            }
+                          </Text>
+                        </TouchableOpacity>
+                      )
+                    )}
+                  </View>
+                )}
+
+
+                {/* =========================================
+                    EXPANDED CATEGORY
+                ========================================= */}
+
+                {!!selectedCategory && (
+                  <View>
+
+                    <TouchableOpacity
+                      activeOpacity={
+                        0.8
+                      }
+
+                      onPress={
+                        closeCategory
+                      }
+
+                      style={{
+                        alignSelf:
+                          'flex-start',
+
+                        backgroundColor:
+                          COLORS.blueSoft,
+
+                        paddingHorizontal:
+                          14,
+
+                        paddingVertical:
+                          10,
+
+                        borderRadius:
+                          RADIUS.round,
+
+                        marginBottom:
+                          25,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royal,
+
+                          fontSize:
+                            12,
+
+                          fontWeight:
+                            '900',
+                        }}
+                      >
+                        ← All Services
+                      </Text>
+                    </TouchableOpacity>
+
+
+                    {/* =====================================
+                        PRODUCT CATALOG
+                    ===================================== */}
+
+                    {selectedCategory ===
+                    'products' ? (
+                      <>
+                        {loadingProducts ? (
+                          <View
+                            style={{
+                              paddingVertical:
+                                50,
+
+                              alignItems:
+                                'center',
+                            }}
+                          >
+                            <ActivityIndicator
+                              size="large"
+
+                              color={
+                                COLORS.royal
+                              }
+                            />
+
+                            <Text
+                              style={{
+                                color:
+                                  COLORS.textMuted,
+
+                                marginTop:
+                                  12,
+                              }}
+                            >
+                              Loading products...
+                            </Text>
+                          </View>
+                        ) : products.length ===
+                          0 ? (
+                          <View
+                            style={{
+                              backgroundColor:
+                                COLORS.blueVerySoft,
+
+                              borderRadius:
+                                RADIUS.large,
+
+                              padding:
+                                28,
+
+                              alignItems:
+                                'center',
+                            }}
+                          >
+                            <Text
+                              style={{
+                                color:
+                                  COLORS.royalDark,
+
+                                fontSize:
+                                  18,
+
+                                fontWeight:
+                                  '900',
+                              }}
+                            >
+                              No products available
+                            </Text>
+
+                            <Text
+                              style={{
+                                color:
+                                  COLORS.textSecondary,
+
+                                fontSize:
+                                  13,
+
+                                textAlign:
+                                  'center',
+
+                                marginTop:
+                                  8,
+                              }}
+                            >
+                              Check back soon for salon products.
+                            </Text>
+                          </View>
+                        ) : (
+                          <View
+                            style={{
+                              flexDirection:
+                                'row',
+
+                              flexWrap:
+                                'wrap',
+
+                              gap:
+                                15,
+                            }}
+                          >
+                            {products.map(
+                              (
+                                product
+                              ) => (
+                                <View
+                                  key={
+                                    product.id
+                                  }
+
+                                  style={{
+                                    width:
+                                      isPhone
+                                        ? '100%'
+                                        : isTablet
+                                        ? '48%'
+                                        : '31.8%',
+
+                                    backgroundColor:
+                                      COLORS.white,
+
+                                    borderWidth:
+                                      1,
+
+                                    borderColor:
+                                      COLORS.border,
+
+                                    borderRadius:
+                                      RADIUS.large,
+
+                                    overflow:
+                                      'hidden',
+
+                                    ...SHADOWS.card,
+                                  }}
+                                >
+                                  {product.image_url ? (
+                                    <Image
+                                      source={{
+                                        uri:
+                                          resolveAvatar(
+                                            product.image_url
+                                          ),
+                                      }}
+
+                                      resizeMode="cover"
+
+                                      style={{
+                                        width:
+                                          '100%',
+
+                                        height:
+                                          isPhone
+                                            ? 250
+                                            : 220,
+                                      }}
+                                    />
+                                  ) : (
+                                    <View
+                                      style={{
+                                        width:
+                                          '100%',
+
+                                        height:
+                                          isPhone
+                                            ? 220
+                                            : 190,
+
+                                        backgroundColor:
+                                          COLORS.blueSoft,
+
+                                        alignItems:
+                                          'center',
+
+                                        justifyContent:
+                                          'center',
+                                      }}
+                                    >
+                                      <Text
+                                        style={{
+                                          color:
+                                            COLORS.royal,
+
+                                          fontSize:
+                                            42,
+
+                                          fontWeight:
+                                            '900',
+                                        }}
+                                      >
+                                        ◈
+                                      </Text>
+
+                                      <Text
+                                        style={{
+                                          color:
+                                            COLORS.textMuted,
+
+                                          fontSize:
+                                            11,
+
+                                          fontWeight:
+                                            '700',
+
+                                          marginTop:
+                                            8,
+                                        }}
+                                      >
+                                        Product Image
+                                      </Text>
+                                    </View>
+                                  )}
+
+
+                                  <View
+                                    style={{
+                                      padding:
+                                        20,
+                                    }}
+                                  >
+                                    <Text
+                                      style={{
+                                        color:
+                                          COLORS.royalDark,
+
+                                        fontSize:
+                                          20,
+
+                                        fontWeight:
+                                          '900',
+                                      }}
+                                    >
+                                      {
+                                        product.name
+                                      }
+                                    </Text>
+
+
+                                    <Text
+                                      style={{
+                                        color:
+                                          COLORS.textSecondary,
+
+                                        fontSize:
+                                          13,
+
+                                        lineHeight:
+                                          20,
+
+                                        marginTop:
+                                          8,
+                                      }}
+                                    >
+                                      {
+                                        product.description ||
+                                        'Professional salon product available at Image & Style.'
+                                      }
+                                    </Text>
+
+
+                                    <Text
+                                      style={{
+                                        color:
+                                          COLORS.royal,
+
+                                        fontSize:
+                                          20,
+
+                                        fontWeight:
+                                          '900',
+
+                                        marginTop:
+                                          18,
+                                      }}
+                                    >
+                                      {
+                                        formatMoney(
+                                          product.price
+                                        )
+                                      }
+                                    </Text>
+                                  </View>
+                                </View>
+                              )
+                            )}
+                          </View>
+                        )}
+                      </>
+                    ) : (
+                      <>
+
+                        {/* =================================
+                            NORMAL APPOINTMENT BOOKING
+                        ================================= */}
+
+                        {loadingCategory ? (
+                          <View
+                            style={{
+                              paddingVertical:
+                                50,
+
+                              alignItems:
+                                'center',
+                            }}
+                          >
+                            <ActivityIndicator
+                              size="large"
+
+                              color={
+                                COLORS.royal
+                              }
+                            />
+
+                            <Text
+                              style={{
+                                color:
+                                  COLORS.textMuted,
+
+                                marginTop:
+                                  12,
+                              }}
+                            >
+                              Loading professionals...
+                            </Text>
+                          </View>
+                        ) : (
+                          <>
+
+                            {/* =================================
+                                PROFESSIONALS
+                            ================================= */}
+
+                            <Text
+                              style={{
+                                color:
+                                  COLORS.royalDark,
+
+                                fontSize:
+                                  22,
+
+                                fontWeight:
+                                  '900',
+
+                                marginBottom:
+                                  6,
+                              }}
+                            >
+                              Choose your professional
+                            </Text>
+
+                            <Text
+                              style={{
+                                color:
+                                  COLORS.textSecondary,
+
+                                fontSize:
+                                  13,
+
+                                marginBottom:
+                                  20,
+                              }}
+                            >
+                              Select who you would like to book with.
+                            </Text>
+
+
+                            {staff.length ===
+                            0 ? (
+                              <View
+                                style={{
+                                  backgroundColor:
+                                    COLORS.blueVerySoft,
+
+                                  borderRadius:
+                                    RADIUS.large,
+
+                                  padding:
+                                    25,
+
+                                  alignItems:
+                                    'center',
+                                }}
+                              >
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.textSecondary,
+
+                                    textAlign:
+                                      'center',
+                                  }}
+                                >
+                                  No professionals are currently assigned to this specialty.
+                                </Text>
+                              </View>
+                            ) : (
+                              <View
+                                style={{
+                                  flexDirection:
+                                    'row',
+
+                                  flexWrap:
+                                    'wrap',
+
+                                  gap: 15,
+                                }}
+                              >
+                                {staff.map(
+                                  (
+                                    member
+                                  ) => {
+                                    const active =
+                                      selectedStaff
+                                        ?.id ===
+                                      member.id;
+
+                                    const avatar =
+                                      resolveAvatar(
+                                        member.avatar_url
+                                      );
+
+                                    const initials =
+                                      member.name
+                                        ?.split(
+                                          ' '
+                                        )
+                                        .map(
+                                          (
+                                            part
+                                          ) =>
+                                            part[0]
+                                        )
+                                        .join('')
+                                        .slice(
+                                          0,
+                                          2
+                                        )
+                                        .toUpperCase();
+
+                                    return (
+                                      <TouchableOpacity
+                                        key={
+                                          member.id
+                                        }
+
+                                        activeOpacity={
+                                          0.85
+                                        }
+
+                                        onPress={() =>
+                                          chooseStaff(
+                                            member
+                                          )
+                                        }
+
+                                        style={{
+                                          width:
+                                            isPhone
+                                              ? '100%'
+                                              : isTablet
+                                              ? '48%'
+                                              : '31.8%',
+
+                                          backgroundColor:
+                                            active
+                                              ? COLORS.blueSoft
+                                              : COLORS.white,
+
+                                          borderWidth:
+                                            active
+                                              ? 2
+                                              : 1,
+
+                                          borderColor:
+                                            active
+                                              ? COLORS.royal
+                                              : COLORS.border,
+
+                                          borderRadius:
+                                            RADIUS.large,
+
+                                          overflow:
+                                            'hidden',
+
+                                          ...SHADOWS.card,
+                                        }}
+                                      >
+                                        {avatar ? (
+                                          <Image
+                                            source={{
+                                              uri:
+                                                avatar,
+                                            }}
+
+                                            resizeMode="cover"
+
+                                            style={{
+                                              width:
+                                                '100%',
+
+                                              height:
+                                                isPhone
+                                                  ? 260
+                                                  : 230,
+                                            }}
+                                          />
+                                        ) : (
+                                          <View
+                                            style={{
+                                              width:
+                                                '100%',
+
+                                              height:
+                                                isPhone
+                                                  ? 220
+                                                  : 200,
+
+                                              backgroundColor:
+                                                COLORS.blueSoft,
+
+                                              alignItems:
+                                                'center',
+
+                                              justifyContent:
+                                                'center',
+                                            }}
+                                          >
+                                            <View
+                                              style={{
+                                                width: 90,
+                                                height: 90,
+
+                                                borderRadius:
+                                                  45,
+
+                                                backgroundColor:
+                                                  COLORS.royal,
+
+                                                alignItems:
+                                                  'center',
+
+                                                justifyContent:
+                                                  'center',
+                                              }}
+                                            >
+                                              <Text
+                                                style={{
+                                                  color:
+                                                    COLORS.white,
+
+                                                  fontSize:
+                                                    28,
+
+                                                  fontWeight:
+                                                    '900',
+                                                }}
+                                              >
+                                                {
+                                                  initials ||
+                                                  'IS'
+                                                }
+                                              </Text>
+                                            </View>
+                                          </View>
+                                        )}
+
+
+                                        <View
+                                          style={{
+                                            padding:
+                                              18,
+                                          }}
+                                        >
+                                          <Text
+                                            style={{
+                                              color:
+                                                COLORS.royalDark,
+
+                                              fontSize:
+                                                18,
+
+                                              fontWeight:
+                                                '900',
+                                            }}
+                                          >
+                                            {
+                                              member.name
+                                            }
+                                          </Text>
+
+                                          <Text
+                                            style={{
+                                              color:
+                                                COLORS.royal,
+
+                                              fontSize:
+                                                12,
+
+                                              fontWeight:
+                                                '800',
+
+                                              marginTop:
+                                                5,
+
+                                              textTransform:
+                                                'capitalize',
+                                            }}
+                                          >
+                                            {
+                                              member.profession ||
+                                              categoryInfo
+                                                ?.title
+                                            }
+                                          </Text>
+
+                                          <Text
+                                            style={{
+                                              color:
+                                                active
+                                                  ? COLORS.royal
+                                                  : COLORS.textMuted,
+
+                                              fontSize:
+                                                12,
+
+                                              fontWeight:
+                                                '800',
+
+                                              marginTop:
+                                                14,
+                                            }}
+                                          >
+                                            {
+                                              active
+                                                ? 'Selected ✓'
+                                                : `Book with ${
+                                                    member.name
+                                                      .split(
+                                                        ' '
+                                                      )[0]
+                                                  } →`
+                                            }
+                                          </Text>
+                                        </View>
+                                      </TouchableOpacity>
+                                    );
+                                  }
+                                )}
+                              </View>
+                            )}
+
+
+                            {/* =================================
+                                BOOKING DETAILS
+                            ================================= */}
+
+                            {!!selectedStaff && (
+                              <View
+                                style={{
+                                  marginTop:
+                                    40,
+
+                                  borderTopWidth:
+                                    1,
+
+                                  borderTopColor:
+                                    COLORS.border,
+
+                                  paddingTop:
+                                    35,
+                                }}
+                              >
+
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.royalBright,
+
+                                    fontSize:
+                                      11,
+
+                                    fontWeight:
+                                      '900',
+
+                                    letterSpacing:
+                                      1.4,
+                                  }}
+                                >
+                                  BOOK WITH
+                                </Text>
+
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.royalDark,
+
+                                    fontSize:
+                                      27,
+
+                                    fontWeight:
+                                      '900',
+
+                                    marginTop:
+                                      5,
+                                  }}
+                                >
+                                  {
+                                    selectedStaff.name
+                                  }
+                                </Text>
+                                                                {/* =============================
+                                    STEP 1 - SERVICE
+                                ============================= */}
+
+<Text
+                                  style={{
+                                    color:
+                                      COLORS.royalDark,
+
+                                    fontSize:
+                                      19,
+
+                                    fontWeight:
+                                      '900',
+
+                                    marginTop:
+                                      30,
+
+                                    marginBottom:
+                                      6,
+                                  }}
+                                >
+                                  1. Select your service
+                                </Text>
+
+
+                                <View
+                                  style={{
+                                    flexDirection:
+                                      'row',
+
+                                    flexWrap:
+                                      'wrap',
+
+                                    gap: 10,
+
+                                    marginTop:
+                                      10,
+                                  }}
+                                >
+                                  {services.map(
+                                    (
+                                      service
+                                    ) => {
+                                      const active =
+                                        selectedService
+                                          ?.id ===
+                                        service.id;
+
+                                      return (
+                                        <TouchableOpacity
+                                          key={
+                                            service.id
+                                          }
+
+                                          activeOpacity={
+                                            0.85
+                                          }
+
+                                          onPress={() =>
+                                            chooseService(
+                                              service
+                                            )
+                                          }
+
+                                          style={{
+                                            width:
+                                              isPhone
+                                                ? '100%'
+                                                : isTablet
+                                                ? '48%'
+                                                : '31.8%',
+
+                                            minHeight:
+                                              95,
+
+                                            backgroundColor:
+                                              active
+                                                ? COLORS.royal
+                                                : COLORS.white,
+
+                                            borderWidth:
+                                              1,
+
+                                            borderColor:
+                                              active
+                                                ? COLORS.royal
+                                                : COLORS.border,
+
+                                            borderRadius:
+                                              RADIUS.medium,
+
+                                            padding:
+                                              15,
+
+                                            justifyContent:
+                                              'center',
+                                          }}
+                                        >
+                                          <Text
+                                            style={{
+                                              color:
+                                                active
+                                                  ? COLORS.white
+                                                  : COLORS.royalDark,
+
+                                              fontSize:
+                                                15,
+
+                                              fontWeight:
+                                                '900',
+                                            }}
+                                          >
+                                            {
+                                              service.name
+                                            }
+                                          </Text>
+
+                                          <Text
+                                            style={{
+                                              color:
+                                                active
+                                                  ? 'rgba(255,255,255,0.72)'
+                                                  : COLORS.textSecondary,
+
+                                              fontSize:
+                                                11,
+
+                                              marginTop:
+                                                6,
+                                            }}
+                                          >
+                                            {
+                                              service.duration_minutes
+                                            }
+                                            {' min • '}
+                                            {
+                                              formatMoney(
+                                                service.price
+                                              )
+                                            }
+                                          </Text>
+                                        </TouchableOpacity>
+                                      );
+                                    }
+                                  )}
+                                </View>
+
+
+                                {/* =============================
+                                    STEP 2 - DATE
+                                ============================= */}
+
+                                {!!selectedService && (
+                                  <View
+                                    style={{
+                                      marginTop:
+                                        35,
+                                    }}
+                                  >
+                                    <Text
+                                      style={{
+                                        color:
+                                          COLORS.royalDark,
+
+                                        fontSize:
+                                          19,
+
+                                        fontWeight:
+                                          '900',
+
+                                        marginBottom:
+                                          6,
+                                      }}
+                                    >
+                                      2. Choose a date
+                                    </Text>
+
+
+                                    <View
+                                      style={{
+                                        backgroundColor:
+                                          COLORS.white,
+
+                                        borderWidth:
+                                          1,
+
+                                        borderColor:
+                                          COLORS.border,
+
+                                        borderRadius:
+                                          RADIUS.large,
+
+                                        overflow:
+                                          'hidden',
+
+                                        maxWidth:
+                                          650,
+
+                                        marginTop:
+                                          15,
+
+                                        ...SHADOWS.card,
+                                      }}
+                                    >
+                                      <Calendar
+                                        current={
+                                          selectedDate
+                                        }
+
+                                        minDate={
+                                          today
+                                        }
+
+                                        onDayPress={
+                                          (
+                                            day
+                                          ) => {
+                                            setSelectedDate(
+                                              day.dateString
+                                            );
+
+                                            setSelectedTime(
+                                              null
+                                            );
+                                          }
+                                        }
+
+                                        markedDates={{
+                                          [
+                                            selectedDate
+                                          ]: {
+                                            selected:
+                                              true,
+
+                                            selectedColor:
+                                              COLORS.royal,
+
+                                            selectedTextColor:
+                                              COLORS.white,
+                                          },
+                                        }}
+
+                                        theme={{
+                                          backgroundColor:
+                                            COLORS.white,
+
+                                          calendarBackground:
+                                            COLORS.white,
+
+                                          textSectionTitleColor:
+                                            COLORS.textMuted,
+
+                                          selectedDayBackgroundColor:
+                                            COLORS.royal,
+
+                                          selectedDayTextColor:
+                                            COLORS.white,
+
+                                          todayTextColor:
+                                            COLORS.royal,
+
+                                          dayTextColor:
+                                            COLORS.text,
+
+                                          textDisabledColor:
+                                            COLORS.borderStrong,
+
+                                          arrowColor:
+                                            COLORS.royal,
+
+                                          monthTextColor:
+                                            COLORS.royalDark,
+
+                                          textMonthFontWeight:
+                                            '900',
+
+                                          textDayFontWeight:
+                                            '600',
+
+                                          textDayHeaderFontWeight:
+                                            '700',
+                                        }}
+                                      />
+                                    </View>
+                                  </View>
+                                )}
+
+
+                                {/* =============================
+                                    STEP 3 - TIME
+                                ============================= */}
+
+                                {!!selectedService && (
+                                  <View
+                                    style={{
+                                      marginTop:
+                                        35,
+                                    }}
+                                  >
+                                    <Text
+                                      style={{
+                                        color:
+                                          COLORS.royalDark,
+
+                                        fontSize:
+                                          19,
+
+                                        fontWeight:
+                                          '900',
+                                      }}
+                                    >
+                                      3. Choose a time
+                                    </Text>
+
+                                    <Text
+                                      style={{
+                                        color:
+                                          COLORS.textSecondary,
+
+                                        fontSize:
+                                          13,
+
+                                        marginTop:
+                                          6,
+
+                                        marginBottom:
+                                          15,
+                                      }}
+                                    >
+                                      Only available times with {
+                                        selectedStaff.name
+                                      } are shown.
+                                    </Text>
+
+
+                                    {loadingAvailability ? (
+                                      <View
+                                        style={{
+                                          paddingVertical:
+                                            30,
+
+                                          alignItems:
+                                            'center',
+                                        }}
+                                      >
+                                        <ActivityIndicator
+                                          color={
+                                            COLORS.royal
+                                          }
+                                        />
+
+                                        <Text
+                                          style={{
+                                            color:
+                                              COLORS.textMuted,
+
+                                            marginTop:
+                                              10,
+
+                                            fontSize:
+                                              12,
+                                          }}
+                                        >
+                                          Checking availability...
+                                        </Text>
+                                      </View>
+                                    ) : availableTimes.length ===
+                                      0 ? (
+                                      <View
+                                        style={{
+                                          backgroundColor:
+                                            COLORS.blueVerySoft,
+
+                                          borderRadius:
+                                            RADIUS.medium,
+
+                                          padding:
+                                            20,
+                                        }}
+                                      >
+                                        <Text
+                                          style={{
+                                            color:
+                                              COLORS.textSecondary,
+
+                                            textAlign:
+                                              'center',
+                                          }}
+                                        >
+                                          No available times for this date. Try another day.
+                                        </Text>
+                                      </View>
+                                    ) : (
+                                      <View
+                                        style={{
+                                          flexDirection:
+                                            'row',
+
+                                          flexWrap:
+                                            'wrap',
+
+                                          gap: 9,
+                                        }}
+                                      >
+                                        {availableTimes.map(
+                                          (
+                                            time
+                                          ) => {
+                                            const active =
+                                              selectedTime ===
+                                              time;
+
+                                            return (
+                                              <TouchableOpacity
+                                                key={
+                                                  time
+                                                }
+
+                                                activeOpacity={
+                                                  0.8
+                                                }
+
+                                                onPress={() =>
+                                                  setSelectedTime(
+                                                    time
+                                                  )
+                                                }
+
+                                                style={{
+                                                  minWidth:
+                                                    isPhone
+                                                      ? '30%'
+                                                      : 105,
+
+                                                  paddingHorizontal:
+                                                    14,
+
+                                                  paddingVertical:
+                                                    13,
+
+                                                  borderRadius:
+                                                    RADIUS.round,
+
+                                                  backgroundColor:
+                                                    active
+                                                      ? COLORS.royal
+                                                      : COLORS.white,
+
+                                                  borderWidth:
+                                                    1,
+
+                                                  borderColor:
+                                                    active
+                                                      ? COLORS.royal
+                                                      : COLORS.border,
+
+                                                  alignItems:
+                                                    'center',
+                                                }}
+                                              >
+                                                <Text
+                                                  style={{
+                                                    color:
+                                                      active
+                                                        ? COLORS.white
+                                                        : COLORS.royal,
+
+                                                    fontSize:
+                                                      12,
+
+                                                    fontWeight:
+                                                      '900',
+                                                  }}
+                                                >
+                                                  {
+                                                    formatTime12(
+                                                      time
+                                                    )
+                                                  }
+                                                </Text>
+                                              </TouchableOpacity>
+                                            );
+                                          }
+                                        )}
+                                      </View>
+                                    )}
+                                  </View>
+                                )}
+
+
+                                {/* =============================
+                                    STEP 4 - INFORMATION
+                                ============================= */}
+
+                                {!!selectedTime && (
+                                  <View
+                                    style={{
+                                      marginTop:
+                                        40,
+
+                                      backgroundColor:
+                                        COLORS.blueVerySoft,
+
+                                      borderRadius:
+                                        RADIUS.xlarge,
+
+                                      padding:
+                                        isPhone
+                                          ? 20
+                                          : 28,
+                                    }}
+                                  >
+                                    <Text
+                                      style={{
+                                        color:
+                                          COLORS.royalDark,
+
+                                        fontSize:
+                                          22,
+
+                                        fontWeight:
+                                          '900',
+                                      }}
+                                    >
+                                      4. Your information
+                                    </Text>
+
+                                    <Text
+                                      style={{
+                                        color:
+                                          COLORS.textSecondary,
+
+                                        fontSize:
+                                          13,
+
+                                        lineHeight:
+                                          20,
+
+                                        marginTop:
+                                          6,
+
+                                        marginBottom:
+                                          22,
+                                      }}
+                                    >
+                                      Enter your information to confirm your appointment.
+                                    </Text>
+
+
+                                    <View
+                                      style={{
+                                        flexDirection:
+                                          isPhone
+                                            ? 'column'
+                                            : 'row',
+
+                                        gap:
+                                          isPhone
+                                            ? 0
+                                            : 12,
+                                      }}
+                                    >
+                                      <FormInput
+                                        label="First name"
+
+                                        value={
+                                          firstName
+                                        }
+
+                                        onChangeText={
+                                          setFirstName
+                                        }
+
+                                        placeholder="First name"
+
+                                        style={{
+                                          flex: 1,
+                                        }}
+                                      />
+
+                                      <FormInput
+                                        label="Last name"
+
+                                        value={
+                                          lastName
+                                        }
+
+                                        onChangeText={
+                                          setLastName
+                                        }
+
+                                        placeholder="Last name"
+
+                                        style={{
+                                          flex: 1,
+                                        }}
+                                      />
+                                    </View>
+
+
+                                    <View
+                                      style={{
+                                        flexDirection:
+                                          isPhone
+                                            ? 'column'
+                                            : 'row',
+
+                                        gap:
+                                          isPhone
+                                            ? 0
+                                            : 12,
+                                      }}
+                                    >
+                                      <FormInput
+                                        label="Phone"
+
+                                        value={
+                                          phone
+                                        }
+
+                                        onChangeText={
+                                          setPhone
+                                        }
+
+                                        placeholder="(305) 000-0000"
+
+                                        keyboardType="phone-pad"
+
+                                        style={{
+                                          flex: 1,
+                                        }}
+                                      />
+
+                                      <FormInput
+                                        label="Email"
+
+                                        value={
+                                          email
+                                        }
+
+                                        onChangeText={
+                                          setEmail
+                                        }
+
+                                        placeholder="you@email.com"
+
+                                        keyboardType="email-address"
+
+                                        autoCapitalize="none"
+
+                                        style={{
+                                          flex: 1,
+                                        }}
+                                      />
+                                    </View>
+
+
+                                    <FormInput
+                                      label="Notes"
+
+                                      value={
+                                        notes
+                                      }
+
+                                      onChangeText={
+                                        setNotes
+                                      }
+
+                                      placeholder="Anything you'd like us to know?"
+                                    />
+
+
+                                    {/* SUMMARY */}
+                                    <View
+                                      style={{
+                                        marginTop:
+                                          8,
+
+                                        backgroundColor:
+                                          COLORS.white,
+
+                                        borderWidth:
+                                          1,
+
+                                        borderColor:
+                                          COLORS.border,
+
+                                        borderRadius:
+                                          RADIUS.large,
+
+                                        padding:
+                                          18,
+                                      }}
+                                    >
+                                      <Text
+                                        style={{
+                                          color:
+                                            COLORS.textMuted,
+
+                                          fontSize:
+                                            10,
+
+                                          fontWeight:
+                                            '900',
+
+                                          letterSpacing:
+                                            1.2,
+                                        }}
+                                      >
+                                        APPOINTMENT SUMMARY
+                                      </Text>
+
+                                      <Text
+                                        style={{
+                                          color:
+                                            COLORS.royalDark,
+
+                                          fontSize:
+                                            18,
+
+                                          fontWeight:
+                                            '900',
+
+                                          marginTop:
+                                            10,
+                                        }}
+                                      >
+                                        {
+                                          selectedService.name
+                                        }
+                                      </Text>
+
+                                      <Text
+                                        style={{
+                                          color:
+                                            COLORS.textSecondary,
+
+                                          fontSize:
+                                            12,
+
+                                          lineHeight:
+                                            20,
+
+                                          marginTop:
+                                            6,
+                                        }}
+                                      >
+                                        With {
+                                          selectedStaff.name
+                                        }
+                                        {'\n'}
+
+                                        {
+                                          formatDateLong(
+                                            selectedDate
+                                          )
+                                        }
+
+                                        {' at '}
+
+                                        {
+                                          formatTime12(
+                                            selectedTime
+                                          )
+                                        }
+
+                                        {'\n'}
+
+                                        {
+                                          selectedService.duration_minutes
+                                        }
+
+                                        {' minutes • '}
+
+                                        {
+                                          formatMoney(
+                                            selectedService.price
+                                          )
+                                        }
+                                      </Text>
+                                    </View>
+
+
+                                    <TouchableOpacity
+                                      activeOpacity={
+                                        0.85
+                                      }
+
+                                      disabled={
+                                        booking
+                                      }
+
+                                      onPress={
+                                        submitBooking
+                                      }
+
+                                      style={{
+                                        minHeight:
+                                          56,
+
+                                        backgroundColor:
+                                          COLORS.royal,
+
+                                        borderRadius:
+                                          RADIUS.medium,
+
+                                        alignItems:
+                                          'center',
+
+                                        justifyContent:
+                                          'center',
+
+                                        marginTop:
+                                          18,
+
+                                        opacity:
+                                          booking
+                                            ? 0.65
+                                            : 1,
+                                      }}
+                                    >
+                                      {booking ? (
+                                        <ActivityIndicator
+                                          color={
+                                            COLORS.white
+                                          }
+                                        />
+                                      ) : (
+                                        <Text
+                                          style={{
+                                            color:
+                                              COLORS.white,
+
+                                            fontSize:
+                                              14,
+
+                                            fontWeight:
+                                              '900',
+                                          }}
+                                        >
+                                          Confirm Appointment
+                                        </Text>
+                                      )}
+                                    </TouchableOpacity>
+                                  </View>
+                                )}
+                              </View>
+                            )}
+                          </>
+                        )}
+                      </>
+                    )}
+                  </View>
+                )}
+              </>
+            )}
+          </View>
+        </View>
+
+
+        {/* =================================================
+            OUR WORK
+            PHOTO-ONLY CAROUSEL
+        ================================================= */}
+
+        <View
+          style={{
+            backgroundColor:
+              COLORS.royal,
+
+            paddingVertical:
+              isPhone
+                ? 60
+                : 85,
+          }}
+        >
+          <View
+            style={{
+              paddingHorizontal:
+                isPhone
+                  ? 20
+                  : 40,
+
+              maxWidth:
+                1200,
+
+              width: '100%',
+
+              alignSelf:
+                'center',
+
+              marginBottom:
+                28,
+            }}
+          >
+            <SectionTitle
+              eyebrow="Our Work"
+
+              title="See what we create"
+
+              description="A look at the work created by the Image & Style team."
+
+              light
+            />
+          </View>
+
+
+          <ScrollView
+            horizontal
+
+            showsHorizontalScrollIndicator={
+              false
+            }
+
+            decelerationRate="fast"
+
+            snapToInterval={
+              isPhone
+                ? 244
+                : isTablet
+                ? 264
+                : 284
+            }
+
+            contentContainerStyle={{
+              paddingHorizontal:
+                isPhone
+                  ? 17
+                  : 40,
+
+              gap: 14,
+            }}
+          >
+            {WORK_IMAGES.map(
+              (
+                item
+              ) => (
+                <View
+                  key={
+                    item.id
+                  }
+
+                  style={{
+                    width:
+                      isPhone
+                        ? 230
+                        : isTablet
+                        ? 250
+                        : 270,
+
+                    height:
+                      isPhone
+                        ? 285
+                        : 320,
+
+                    borderRadius:
+                      20,
+
+                    overflow:
+                      'hidden',
+
+                    backgroundColor:
+                      COLORS.white,
+
+                    ...SHADOWS.card,
+                  }}
+                >
+                  <Image
+                    source={{
+                      uri:
+                        item.image,
+                    }}
+
+                    resizeMode="cover"
+
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                    }}
+                  />
+                </View>
+              )
+            )}
+          </ScrollView>
+        </View>
+
+
+        {/* =================================================
+            ABOUT IMAGE & STYLE
+        ================================================= */}
+
+        <View
+          style={{
+            backgroundColor:
+              '#151515',
+
+            paddingHorizontal:
+              isPhone
+                ? 20
+                : 40,
+
+            paddingVertical:
+              isPhone
+                ? 68
+                : 96,
+          }}
+        >
+          <View
+            style={{
+              width: '100%',
+
+              maxWidth:
+                1200,
+
+              alignSelf:
+                'center',
+
+              flexDirection:
+                isPhone
+                  ? 'column'
+                  : 'row',
+
+              alignItems:
+                'center',
+
+              gap:
+                isPhone
+                  ? 42
+                  : 70,
+            }}
+          >
+            <View
+              style={{
+                flex: 1,
+
+                alignItems:
+                  isPhone
+                    ? 'center'
+                    : 'flex-start',
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    '#83a9ff',
+
+                  fontSize: 11,
+
+                  fontWeight:
+                    '900',
+
+                  letterSpacing:
+                    2,
+
+                  textTransform:
+                    'uppercase',
+                }}
+              >
+                About Image & Style
+              </Text>
+
+              <Text
+                style={{
+                  color:
+                    COLORS.white,
+
+                  fontSize:
+                    isPhone
+                      ? 34
+                      : 48,
+
+                  lineHeight:
+                    isPhone
+                      ? 41
+                      : 56,
+
+                  fontWeight:
+                    '900',
+
+                  marginTop:
+                    14,
+
+                  maxWidth:
+                    560,
+
+                  textAlign:
+                    isPhone
+                      ? 'center'
+                      : 'left',
+                }}
+              >
+                Your beauty experience should feel personal.
+              </Text>
+
+              <Text
+                style={{
+                  color:
+                    'rgba(255,255,255,0.68)',
+
+                  fontSize:
+                    isPhone
+                      ? 14
+                      : 16,
+
+                  lineHeight:
+                    isPhone
+                      ? 23
+                      : 26,
+
+                  marginTop:
+                    20,
+
+                  maxWidth:
+                    590,
+
+                  textAlign:
+                    isPhone
+                      ? 'center'
+                      : 'left',
+                }}
+              >
+                Image & Style brings talented beauty
+                professionals, thoughtful service, and simple
+                online booking together in one welcoming salon
+                experience.
+              </Text>
+
+              <TouchableOpacity
+                activeOpacity={
+                  0.85
+                }
+
+                onPress={
+                  scrollToServices
+                }
+
+                style={{
+                  minHeight:
+                    52,
+
+                  paddingHorizontal:
+                    24,
+
+                  borderRadius:
+                    RADIUS.round,
+
+                  backgroundColor:
+                    COLORS.royal,
+
+                  alignItems:
+                    'center',
+
+                  justifyContent:
+                    'center',
+
+                  marginTop:
+                    28,
+
+                  alignSelf:
+                    isPhone
+                      ? 'stretch'
+                      : 'flex-start',
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      COLORS.white,
+
+                    fontSize:
+                      13,
+
+                    fontWeight:
+                      '900',
+
+                    textAlign:
+                      'center',
+                  }}
+                >
+                  Find Your Service
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <View
+              style={{
+                flex: 1,
+
+                width:
+                  isPhone
+                    ? '100%'
+                    : undefined,
+
+                flexDirection:
+                  'row',
+
+                flexWrap:
+                  'wrap',
+
+                gap:
+                  14,
+              }}
+            >
+              {[
+                {
+                  number:
+                    '01',
+
+                  title:
+                    'Personal',
+
+                  description:
+                    'Services selected around your style and goals.',
+                },
+                {
+                  number:
+                    '02',
+
+                  title:
+                    'Professional',
+
+                  description:
+                    'Choose the team member who fits your service.',
+                },
+                {
+                  number:
+                    '03',
+
+                  title:
+                    'Simple',
+
+                  description:
+                    'See availability and reserve your visit online.',
+                },
+                {
+                  number:
+                    '04',
+
+                  title:
+                    'Connected',
+
+                  description:
+                    'Your booking stays connected with the salon team.',
+                },
+              ].map(
+                (
+                  item
+                ) => (
+                  <View
+                    key={
+                      item.number
+                    }
+
+                    style={{
+                      width:
+                        isPhone
+                          ? '100%'
+                          : '47.5%',
+
+                      minHeight:
+                        164,
+
+                      backgroundColor:
+                        '#222222',
+
+                      borderWidth:
+                        1,
+
+                      borderColor:
+                        'rgba(255,255,255,0.1)',
+
+                      borderRadius:
+                        24,
+
+                      padding:
+                        22,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          '#83a9ff',
+
+                        fontSize:
+                          11,
+
+                        fontWeight:
+                          '900',
+                      }}
+                    >
+                      {item.number}
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.white,
+
+                        fontSize:
+                          19,
+
+                        fontWeight:
+                          '900',
+
+                        marginTop:
+                          17,
+                      }}
+                    >
+                      {item.title}
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          'rgba(255,255,255,0.58)',
+
+                        fontSize:
+                          12,
+
+                        lineHeight:
+                          19,
+
+                        marginTop:
+                          8,
+                      }}
+                    >
+                      {item.description}
+                    </Text>
+                  </View>
+                )
+              )}
+            </View>
+          </View>
+        </View>
+
+
+        {/* =================================================
+            CLIENT TESTIMONIALS
+        ================================================= */}
+
+        <View
+          style={{
+            backgroundColor:
+              '#f7f1e8',
+
+            paddingHorizontal:
+              isPhone
+                ? 20
+                : 40,
+
+            paddingVertical:
+              isPhone
+                ? 68
+                : 92,
+          }}
+        >
+          <View
+            style={{
+              width: '100%',
+
+              maxWidth:
+                1200,
+
+              alignSelf:
+                'center',
+            }}
+          >
+            <SectionTitle
+              eyebrow="Client Love"
+
+              title="What our guests say"
+
+              description="Real client experiences will be featured here."
+            />
+
+            <View
+              style={{
+                flexDirection:
+                  'row',
+
+                flexWrap:
+                  'wrap',
+
+                gap:
+                  16,
+              }}
+            >
+              {TESTIMONIALS.map(
+                (
+                  testimonial,
+                  index
+                ) => (
+                  <View
+                    key={
+                      testimonial.id
+                    }
+
+                    style={{
+                      width:
+                        isPhone
+                          ? '100%'
+                          : isTablet
+                          ? '48%'
+                          : '31.8%',
+
+                      minHeight:
+                        220,
+
+                      backgroundColor:
+                        COLORS.white,
+
+                      borderWidth:
+                        1,
+
+                      borderColor:
+                        COLORS.border,
+
+                      borderRadius:
+                        26,
+
+                      padding:
+                        24,
+
+                      justifyContent:
+                        'space-between',
+
+                      ...SHADOWS.card,
+                    }}
+                  >
+                    <View>
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royal,
+
+                          fontSize:
+                            28,
+
+                          fontWeight:
+                            '900',
+                        }}
+                      >
+                        “
+                      </Text>
+
+                      <Text
+                        style={{
+                          color:
+                            '#171717',
+
+                          fontSize:
+                            17,
+
+                          lineHeight:
+                            26,
+
+                          fontWeight:
+                            '700',
+
+                          marginTop:
+                            7,
+                        }}
+                      >
+                        {testimonial.quote}
+                      </Text>
+                    </View>
+
+                    <View
+                      style={{
+                        borderTopWidth:
+                          1,
+
+                        borderTopColor:
+                          COLORS.border,
+
+                        paddingTop:
+                          15,
+
+                        marginTop:
+                          24,
+
+                        flexDirection:
+                          'row',
+
+                        alignItems:
+                          'center',
+
+                        justifyContent:
+                          'space-between',
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.textMuted,
+
+                          fontSize:
+                            9,
+
+                          fontWeight:
+                            '900',
+
+                          letterSpacing:
+                            1,
+                        }}
+                      >
+                        {testimonial.label}
+                      </Text>
+
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royal,
+
+                          fontSize:
+                            11,
+
+                          fontWeight:
+                            '900',
+                        }}
+                      >
+                        0{index + 1}
+                      </Text>
+                    </View>
+                  </View>
+                )
+              )}
+            </View>
+          </View>
+        </View>
+
+
+        {/* =================================================
+            BEAUTY MADE PERSONAL
+        ================================================= */}
+
+        <View
+          style={{
+            backgroundColor:
+              COLORS.blueVerySoft,
+
+            paddingHorizontal:
+              isPhone
+                ? 20
+                : 40,
+
+            paddingVertical:
+              isPhone
+                ? 70
+                : 95,
+          }}
+        >
+          <View
+            style={{
+              maxWidth:
+                850,
+
+              width: '100%',
+
+              alignSelf:
+                'center',
+            }}
+          >
+            <SectionTitle
+              eyebrow="Image & Style"
+
+              title="Beauty made personal"
+
+              description="Our goal is to make booking simple while giving every guest a personalized salon experience."
+            />
+
+
+            <TouchableOpacity
+              activeOpacity={
+                0.85
+              }
+
+              onPress={
+                scrollToServices
+              }
+
+              style={{
+                alignSelf:
+                  'center',
+
+                minHeight:
+                  52,
+
+                paddingHorizontal:
+                  26,
+
+                borderRadius:
+                  RADIUS.round,
+
+                backgroundColor:
+                  COLORS.royal,
+
+                alignItems:
+                  'center',
+
+                justifyContent:
+                  'center',
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    COLORS.white,
+
+                  fontSize:
+                    13,
+
+                  fontWeight:
+                    '900',
+                }}
+              >
+                Explore Our Services
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+
+        {/* =================================================
+            FOOTER
+        ================================================= */}
+
+        <View
+          style={{
+            backgroundColor:
+              COLORS.royalDark,
+
+            paddingHorizontal:
+              isPhone
+                ? 20
+                : 40,
+
+            paddingVertical:
+              42,
+          }}
+        >
+          <View
+            style={{
+              maxWidth:
+                1200,
+
+              width: '100%',
+
+              alignSelf:
+                'center',
+
+              flexDirection:
+                isPhone
+                  ? 'column'
+                  : 'row',
+
+              alignItems:
+                'center',
+
+              justifyContent:
+                'space-between',
+
+              gap: 25,
+            }}
+          >
+            <View
+              style={{
+                flexDirection:
+                  'row',
+
+                alignItems:
+                  'center',
+              }}
+            >
+              <Image
+                source={
+                  BRAND_LOGO
+                }
+
+                style={{
+                  width: 48,
+                  height: 48,
+                  borderRadius: 25,
+                }}
+              />
+
+              <View
+                style={{
+                  marginLeft: 10,
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      COLORS.white,
+
+                    fontSize: 17,
+
+                    fontWeight:
+                      '900',
+                  }}
+                >
+                  Image & Style
+                </Text>
+
+                <Text
+                  style={{
+                    color:
+                      'rgba(255,255,255,0.5)',
+
+                    fontSize: 10,
+
+                    marginTop: 2,
+                  }}
+                >
+                  Beauty Salon
+                </Text>
+              </View>
+            </View>
+
+
+            <View
+              style={{
+                flexDirection:
+                  'row',
+
+                gap: 20,
+              }}
+            >
+              <TouchableOpacity
+                onPress={
+                  openPhone
+                }
+              >
+                <Text
+                  style={{
+                    color:
+                      COLORS.white,
+
+                    fontSize: 12,
+
+                    fontWeight:
+                      '700',
+                  }}
+                >
+                  Call
+                </Text>
+              </TouchableOpacity>
+
+
+              <TouchableOpacity
+                onPress={
+                  openInstagram
+                }
+              >
+                <Text
+                  style={{
+                    color:
+                      COLORS.white,
+
+                    fontSize: 12,
+
+                    fontWeight:
+                      '700',
+                  }}
+                >
+                  Instagram
+                </Text>
+              </TouchableOpacity>
+
+
+              <TouchableOpacity
+                onPress={
+                  onStaffLogin
+                }
+              >
+                <Text
+                  style={{
+                    color:
+                      'rgba(255,255,255,0.65)',
+
+                    fontSize: 12,
+
+                    fontWeight:
+                      '700',
+                  }}
+                >
+                  Staff
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+
+            <Text
+              style={{
+                color:
+                  'rgba(255,255,255,0.45)',
+
+                fontSize: 10,
+
+                textAlign:
+                  'center',
+              }}
+            >
+              © {new Date().getFullYear()} Image & Style
+            </Text>
+          </View>
+        </View>
+
+      </ScrollView>
+    </SafeAreaView>
+  );
+}

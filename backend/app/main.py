@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 import secrets
+import asyncio
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from .database import Base, engine
 from . import models, deps  # ensure models imported; deps for role guard
 from .routers import public
+from .sms_service import reminder_worker
 
 # Routers
 from .auth import router as auth_router
@@ -22,6 +24,7 @@ from .routers import (
     time,
     payments,
     users,
+    sms,
 )
 from .routers import services as services_router  # <-- alias for clarity
 
@@ -111,6 +114,53 @@ app.include_router(sales.router,             prefix="/sales",        tags=["sale
 app.include_router(earnings.router,          prefix="/earnings",     tags=["earnings"])
 app.include_router(time.router,              prefix="/time",         tags=["time"])
 app.include_router(payments.router,          prefix="/payments",     tags=["payments"])
+app.include_router(sms.router,               prefix="/sms",          tags=["sms"])
 app.include_router(users.router,             prefix="/users",        tags=["users"])
 app.include_router(services_router.router,   prefix="/services",     tags=["services"])  # owner CRUD for services
 app.include_router(public.router,            prefix="/public",       tags=["public"])
+
+
+
+# =========================================================
+# TWO-HOUR SMS REMINDER WORKER
+# =========================================================
+
+@app.on_event(
+    "startup"
+)
+async def start_sms_reminder_worker():
+    current_task = getattr(
+        app.state,
+        "sms_reminder_task",
+        None,
+    )
+
+    if (
+        current_task is None
+        or current_task.done()
+    ):
+        app.state.sms_reminder_task = (
+            asyncio.create_task(
+                reminder_worker()
+            )
+        )
+
+
+@app.on_event(
+    "shutdown"
+)
+async def stop_sms_reminder_worker():
+    task = getattr(
+        app.state,
+        "sms_reminder_task",
+        None,
+    )
+
+    if task:
+        task.cancel()
+
+        try:
+            await task
+
+        except asyncio.CancelledError:
+            pass

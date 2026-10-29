@@ -7,3 +7,4 @@ python-jose[cryptography]==3.3.0
 pydantic==2.6.4
 python-multipart==0.0.9
 stripe==7.10.0
+twilio==9.11.0

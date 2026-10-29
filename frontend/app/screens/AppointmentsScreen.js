@@ -1,941 +1,15003 @@
-// Frontend/app/screens/AppointmentsScreen.js
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { API_BASE_URL } from '../config';
-import { Calendar } from 'react-native-calendars';
-import { Picker } from '@react-native-picker/picker';
-import {
-  View, Text, Button, TouchableOpacity, Alert,
-  FlatList, Platform, TextInput,
-  KeyboardAvoidingView, TouchableWithoutFeedback, Keyboard,
-  Animated, Dimensions, Pressable, ScrollView
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { StatusBar } from 'expo-status-bar';
+// frontend/app/screens/AppointmentsScreen.js
 
-const OPEN_TIME = 9;   // 9am
-const CLOSE_TIME = 19; // 7pm
+import React, {
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
+
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  ScrollView,
+  Modal,
+  Pressable,
+  TextInput,
+  Alert,
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  Linking,
+  StyleSheet,
+  useWindowDimensions,
+} from 'react-native';
+
+import {
+  Calendar,
+} from 'react-native-calendars';
+
+import {
+  API_BASE_URL,
+} from '../config';
+
+import {
+  COLORS,
+  RADIUS,
+  SHADOWS,
+} from '../theme';
+
+
+const OPEN_TIME = 9;
+const CLOSE_TIME = 19;
 const SLOT_MINUTES = 15;
 
-const pad = (n) => String(n).padStart(2, '0');
-function generateSlots(openHour = OPEN_TIME, closeHour = CLOSE_TIME, step = SLOT_MINUTES) {
-  const slots = [];
-  for (let h = openHour; h < closeHour; h++) {
-    for (let m = 0; m < 60; m += step) {
-      slots.push(`${pad(h)}:${pad(m)}`);
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+const pad = (n) =>
+  String(n).padStart(2, '0');
+
+
+function localToday() {
+  const d =
+    new Date();
+
+  return (
+    `${d.getFullYear()}-` +
+    `${pad(d.getMonth() + 1)}-` +
+    `${pad(d.getDate())}`
+  );
+}
+
+
+function generateSlots() {
+  const result = [];
+
+  for (
+    let hour = OPEN_TIME;
+    hour < CLOSE_TIME;
+    hour++
+  ) {
+    for (
+      let minute = 0;
+      minute < 60;
+      minute += SLOT_MINUTES
+    ) {
+      result.push(
+        `${pad(hour)}:${pad(minute)}`
+      );
     }
   }
-  return slots;
+
+  return result;
 }
 
-// Keep times in LOCAL time
-function addMinutesLocal(dateTimeLocalStr, minutes) {
-  const [dateStr, timeStr] = dateTimeLocalStr.split('T');
-  const [Y, M, D] = dateStr.split('-').map(Number);
-  const [h, m, s] = timeStr.split(':').map(Number);
-  const base = new Date(Y, M - 1, D, h, m, s || 0);
-  const added = new Date(base.getTime() + minutes * 60000);
-  return `${added.getFullYear()}-${pad(added.getMonth() + 1)}-${pad(added.getDate())}T${pad(added.getHours())}:${pad(added.getMinutes())}:${pad(added.getSeconds())}`;
+
+function addMinutesLocal(
+  dateTimeLocalStr,
+  minutes
+) {
+  const [
+    dateStr,
+    timeStr,
+  ] =
+    dateTimeLocalStr.split('T');
+
+  const [
+    year,
+    month,
+    day,
+  ] =
+    dateStr
+      .split('-')
+      .map(Number);
+
+  const [
+    hour,
+    minute,
+    second,
+  ] =
+    timeStr
+      .split(':')
+      .map(Number);
+
+  const base =
+    new Date(
+      year,
+      month - 1,
+      day,
+      hour,
+      minute,
+      second || 0
+    );
+
+  const added =
+    new Date(
+      base.getTime() +
+      minutes * 60000
+    );
+
+  return (
+    `${added.getFullYear()}-` +
+    `${pad(added.getMonth() + 1)}-` +
+    `${pad(added.getDate())}` +
+    `T${pad(added.getHours())}:` +
+    `${pad(added.getMinutes())}:` +
+    `${pad(added.getSeconds())}`
+  );
 }
 
-async function fetchOk(url, opts) {
-  const res = await fetch(url, opts);
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error(`${res.status} ${t}`);
+
+function durationMinutes(
+  start,
+  end
+) {
+  return Math.max(
+    0,
+    Math.round(
+      (
+        new Date(end) -
+        new Date(start)
+      ) /
+      60000
+    )
+  );
+}
+
+
+function formatTime12(
+  value
+) {
+  if (!value) {
+    return '';
   }
-  return res;
-}
 
-function computePanelWidth(winWidth) {
-  return Math.round(Math.min(420, Math.max(320, winWidth * 0.88)));
-}
+  let date;
 
-/** ------- NEW: Format helpers ------- **/
-function fmtMDY(date) {
-  return new Date(date).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
-}
-function fmtTime12(date) {
-  return new Date(date).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }).replace('am','AM').replace('pm','PM');
-}
-function fmtRange(startISO, endISO) {
-  const d = fmtMDY(startISO);
-  const t1 = fmtTime12(startISO);
-  const t2 = fmtTime12(endISO);
-  return { date: d, times: `${t1} to ${t2}` };
-}
+  if (
+    typeof value === 'string' &&
+    /^\d{2}:\d{2}$/.test(value)
+  ) {
+    const [
+      hour,
+      minute,
+    ] =
+      value
+        .split(':')
+        .map(Number);
 
-export default function AppointmentsScreen({ token, onLogout, me }) {
-  const [appointments, setAppointments] = useState([]);
+    date =
+      new Date(
+        2000,
+        0,
+        1,
+        hour,
+        minute
+      );
+  } else {
+    date =
+      new Date(value);
+  }
 
-  // staff (app side: show all, optionally filter by specialty)
-  const [staff, setStaff] = useState([]);
-  const [staffId, setStaffId] = useState(null);
-
-  // clients
-  const [clients, setClients] = useState([]);
-  const [clientId, setClientId] = useState(null);
-  const [clientSearch, setClientSearch] = useState("");
-
-  // add-client
-  const [showAddClient, setShowAddClient] = useState(false);
-  const [firstName, setFirstName] = useState("");
-  const [lastName,  setLastName]  = useState("");
-  const [phone,     setPhone]     = useState("");
-  const [email,     setEmail]     = useState("");
-
-  // products (for add to ticket when editing)
-  const [products, setProducts] = useState([]);
-
-  // ------- NEW: dynamic specialties/services -------
-  const [specialties, setSpecialties] = useState([]); // [{slug,label}]
-  const [specialtySlug, setSpecialtySlug] = useState(""); // 'hair', 'nails', etc.
-  const specialtyLabel = useMemo(
-    () => (specialties.find(s => s.slug === specialtySlug)?.label || specialtySlug || ""),
-    [specialties, specialtySlug]
+  return date.toLocaleTimeString(
+    'en-US',
+    {
+      hour: 'numeric',
+      minute: '2-digit',
+    }
   );
+}
 
-  const [services, setServices] = useState([]); // [{id,name,duration_minutes,price,category}]
-  const [serviceId, setServiceId] = useState(null);
-  const selectedService = useMemo(
-    () => services.find(s => s.id === serviceId) || null,
-    [services, serviceId]
+
+function formatDateLong(
+  value
+) {
+  if (!value) {
+    return '';
+  }
+
+  const [
+    y,
+    m,
+    d,
+  ] =
+    value
+      .split('-')
+      .map(Number);
+
+  return new Date(
+    y,
+    m - 1,
+    d
+  ).toLocaleDateString(
+    'en-US',
+    {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    }
   );
+}
 
-  // durations/pricing (can override)
-  const [hours, setHours] = useState("0");
-  const [minutesOverride, setMinutesOverride] = useState("30");
-  const [price, setPrice] = useState("0");
 
-  const today = new Date().toISOString().slice(0,10);
-  const [selectedDate, setSelectedDate] = useState(today);
-  const [selectedTime, setSelectedTime] = useState(null);
-  const slotsForDay = useMemo(() => generateSlots(), []);
+function getTimeKey(
+  dateValue
+) {
+  const d =
+    new Date(dateValue);
 
-  // availability
-  const [takenSlots, setTakenSlots] = useState(new Set());
-
-  // EDITOR state
-  const [editingId, setEditingId] = useState(null);
-  const [editStartDate, setEditStartDate] = useState(today);
-  const [editStartTime, setEditStartTime] = useState(null);
-  const [editHours, setEditHours] = useState("0");
-  const [editMinutes, setEditMinutes] = useState("30");
-  const [editPrice, setEditPrice] = useState("0");
-  const [editTip, setEditTip] = useState("0");
-  const [editServiceName, setEditServiceName] = useState("");
-  const [editNotes, setEditNotes] = useState("");
-
-  // add product in editor
-  const [addProdId, setAddProdId] = useState(null);
-  const [addQty, setAddQty] = useState("1");
-
-  // RIGHT SIDEBAR (create panel)
-  const [panelOpen, setPanelOpen] = useState(false);
-  const [panelWidth, setPanelWidth] = useState(computePanelWidth(Dimensions.get('window').width));
-  const slide = useRef(new Animated.Value(1)).current; // 1 = offscreen, 0 = visible
-
-  useEffect(() => {
-    const sub = Dimensions.addEventListener('change', ({ window }) => {
-      setPanelWidth(computePanelWidth(window.width));
-    });
-    return () => sub?.remove?.();
-  }, []);
-
-  const authHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-  const canPickStaff = me?.role === 'owner' || me?.role === 'receptionist';
-
-  // loaders
-  const loadAppointments = async () => {
-    const r = await fetchOk(`${API_BASE_URL}/appointments/`, { headers: authHeaders });
-    setAppointments(await r.json());
-  };
-
-  const loadClients = async () => {
-    const url = new URL(`${API_BASE_URL}/clients/search`);
-    url.searchParams.set('limit', '200');
-    const r = await fetchOk(url.toString(), { headers: authHeaders });
-    const list = await r.json();
-    setClients(Array.isArray(list) ? list : []);
-    if (!clientId && Array.isArray(list) && list.length > 0) setClientId(list[0].id);
-  };
-
-  const loadStaff = async () => {
-    const r = await fetchOk(`${API_BASE_URL}/users/?role=staff`, { headers: authHeaders });
-    const list = await r.json();
-    setStaff(Array.isArray(list) ? list : []);
-    if ((me?.role === 'owner' || me?.role === 'receptionist') && !staffId && list.length) {
-      setStaffId(list[0].id);
-    }
-  };
-
-  const loadProducts = async () => {
-    try {
-      const r = await fetchOk(`${API_BASE_URL}/products/`, { headers: authHeaders });
-      const list = await r.json();
-      setProducts(Array.isArray(list) ? list : []);
-      if (Array.isArray(list) && list.length > 0) setAddProdId(list[0].id);
-    } catch {
-      setProducts([]);
-    }
-  };
-
-  const loadAvailability = async (dateStr, staffVal) => {
-    if (!dateStr || !staffVal) { setTakenSlots(new Set()); return; }
-    const dayStart = `${dateStr}T00:00:00`;
-    const dayEnd   = `${dateStr}T23:59:59`;
-    const url = new URL(`${API_BASE_URL}/appointments/`);
-    url.searchParams.set('start', dayStart);
-    url.searchParams.set('end', dayEnd);
-    url.searchParams.set('staff_id', String(staffVal));
-    const r = await fetchOk(url.toString(), { headers: authHeaders });
-    const list = await r.json();
-    const set = new Set();
-    list.forEach(appt => {
-      const start = new Date(appt.start_time);
-      const end   = new Date(appt.end_time);
-      for (let t = new Date(start) ; t < end ; t = new Date(t.getTime() + SLOT_MINUTES * 60000)) {
-        set.add(`${pad(t.getHours())}:${pad(t.getMinutes())}`);
-      }
-    });
-    setTakenSlots(set);
-  };
-
-  // NEW: load specialties on mount
-  const loadSpecialties = async () => {
-    try {
-      const r = await fetchOk(`${API_BASE_URL}/public/specialties`);
-      const data = await r.json(); // [{slug,label}]
-      setSpecialties(Array.isArray(data) ? data : []);
-      // pick first specialty by default (optional)
-      if (Array.isArray(data) && data.length && !specialtySlug) {
-        setSpecialtySlug(data[0].slug);
-      }
-    } catch {
-      setSpecialties([]);
-    }
-  };
-
-  // NEW: load services when specialty changes
-  useEffect(() => {
-    (async () => {
-      if (!specialtySlug) { setServices([]); setServiceId(null); return; }
-      try {
-        const r = await fetchOk(`${API_BASE_URL}/public/services?category=${encodeURIComponent(specialtySlug)}`);
-        const svcs = await r.json();
-        setServices(Array.isArray(svcs) ? svcs : []);
-        if (Array.isArray(svcs) && svcs.length) {
-          setServiceId(svcs[0].id);
-          setHours("0");
-          setMinutesOverride(String(svcs[0].duration_minutes ?? 30));
-          setPrice(String(svcs[0].price ?? 0));
-        } else {
-          setServiceId(null);
-          setMinutesOverride("30");
-          setPrice("0");
-        }
-
-        // optionally auto-pick a staff who matches the specialty
-        const match = staff.find(s => (s.profession || '').toLowerCase() === specialtySlug.toLowerCase());
-        if (match) setStaffId(match.id);
-      } catch {
-        setServices([]);
-        setServiceId(null);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [specialtySlug]);
-
-  // Init
-  useEffect(() => {
-    (async () => {
-      try {
-        if (me?.id && !staffId && !canPickStaff) setStaffId(me.id);
-        if (canPickStaff) await loadStaff();
-        await Promise.all([loadClients(), loadAppointments(), loadProducts(), loadSpecialties()]);
-      } catch (e) {
-        Alert.alert('Init error', String(e.message || e));
-      }
-    })();
-  }, [me?.id, me?.role]);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        if (selectedDate && staffId) await loadAvailability(selectedDate, staffId);
-        else setTakenSlots(new Set());
-      } catch {
-        setTakenSlots(new Set());
-      }
-    })();
-  }, [selectedDate, staffId]);
-
-  // actions
-  const createClient = async () => {
-    try {
-      if (!firstName.trim() || !lastName.trim()) return Alert.alert('Missing info', 'First and last name are required.');
-      const body = JSON.stringify({
-        first_name: firstName.trim(),
-        last_name:  lastName.trim(),
-        phone:      phone.trim() || null,
-        email:      email.trim() || null,
-      });
-      const res = await fetchOk(`${API_BASE_URL}/clients/`, { method: 'POST', headers: authHeaders, body });
-      const cli = await res.json();
-      await loadClients();
-      setClientId(cli.id);
-      setShowAddClient(false);
-      setFirstName(""); setLastName(""); setPhone(""); setEmail("");
-      Alert.alert('Client added', `${cli.first_name} ${cli.last_name} created.`);
-    } catch (e) {
-      Alert.alert('Error', e.message);
-    }
-  };
-
-  const createAppointment = async () => {
-    try {
-      if (!staffId) return Alert.alert('Select staff', 'Please pick who will perform the service.');
-      if (!clientId) return Alert.alert('Select client', 'Please pick or create a client.');
-      if (!selectedTime) return Alert.alert('Select time', 'Please choose a time slot.');
-      if (takenSlots.has(selectedTime)) return Alert.alert('Time unavailable', 'That slot is already booked.');
-      if (!selectedService) return Alert.alert('Select service', 'Please choose a service.');
-      if (!specialtySlug) return Alert.alert('Select specialty', 'Please choose a specialty.');
-
-      const totalMins = Math.max(5, (parseInt(hours || "0", 10) * 60) + parseInt(minutesOverride || "0", 10));
-      const startISO = `${selectedDate}T${selectedTime}:00`;
-      const endISO = addMinutesLocal(startISO, totalMins);
-      const notes = `${specialtyLabel}${price ? ` | $${Number(price).toFixed(2)}` : ''} | ${totalMins} min`;
-
-      const body = JSON.stringify({
-        client_id: Number(clientId),
-        staff_id: Number(staffId),
-        service_name: selectedService.name,  // store name on appointment
-        start_time: startISO,
-        end_time: endISO,
-        notes,
-        price: Number(price)
-      });
-
-      await fetchOk(`${API_BASE_URL}/appointments/`, { method: 'POST', headers: authHeaders, body });
-
-      setSelectedTime(null);
-      await Promise.all([loadAppointments(), loadAvailability(selectedDate, staffId)]);
-      Alert.alert('Success', `${selectedService.name} booked on ${selectedDate} at ${selectedTime}`);
-      closePanel();
-    } catch (e) {
-      Alert.alert('Create failed', e.message);
-    }
-  };
-
-  const deleteAppointment = async (id) => {
-    try {
-      await fetchOk(`${API_BASE_URL}/appointments/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
-      await Promise.all([loadAppointments(), loadAvailability(selectedDate, staffId)]);
-    } catch (e) {
-      Alert.alert('Delete failed', e.message);
-    }
-  };
-
-  // ---- EDITOR ----
-  const openEditor = (a) => {
-    setEditingId(a.id);
-    const start = new Date(a.start_time);
-    const end = new Date(a.end_time);
-    const mins = Math.max(5, Math.round((end - start) / 60000));
-    setEditStartDate(a.start_time.slice(0,10));
-    setEditStartTime(`${pad(start.getHours())}:${pad(start.getMinutes())}`);
-    setEditHours(String(Math.floor(mins / 60)));
-    setEditMinutes(String(mins % 60));
-    setEditPrice(String(a.price ?? 0));
-    setEditTip(String(a.tip ?? 0));
-    setEditServiceName(a.service_name || '');
-    setEditNotes(a.notes || '');
-    if (products.length > 0) setAddProdId(products[0].id);
-    setAddQty("1");
-  };
-
-  const closeEditor = () => setEditingId(null);
-
-  const saveEdits = async () => {
-    try {
-      if (!editingId) return;
-      if (!editStartDate || !editStartTime) return Alert.alert('Missing', 'Pick start date/time.');
-      const totalMins = Math.max(5, (parseInt(editHours || "0",10)*60) + parseInt(editMinutes || "0",10));
-      const startISO = `${editStartDate}T${editStartTime}:00`;
-      const endISO = addMinutesLocal(startISO, totalMins);
-
-      const body = {
-        start_time: startISO,
-        end_time: endISO,
-        price: Number(editPrice || 0),
-        tip: Number(editTip || 0),
-        service_name: editServiceName || undefined,
-        notes: editNotes || undefined,
-      };
-
-      await fetchOk(`${API_BASE_URL}/appointments/${editingId}`, {
-        method: 'PUT',
-        headers: authHeaders,
-        body: JSON.stringify(body),
-      });
-
-      await Promise.all([loadAppointments(), loadAvailability(selectedDate, staffId)]);
-      closeEditor();
-      Alert.alert('Saved', 'Appointment updated.');
-    } catch (e) {
-      Alert.alert('Update failed', String(e.message || e));
-    }
-  };
-
-  const addProductToTicket = async () => {
-    try {
-      if (!editingId) return;
-      if (!addProdId) return Alert.alert('Pick a product', 'Please select a product.');
-      const qty = Math.max(1, parseInt(addQty || "1", 10));
-      await fetchOk(`${API_BASE_URL}/appointments/${editingId}/add_sale`, {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify({ product_id: Number(addProdId), quantity: qty }),
-      });
-      Alert.alert('Added', 'Product added to this ticket.');
-    } catch (e) {
-      Alert.alert('Add product failed', String(e.message || e));
-    }
-  };
-
-  // ---------- RIGHT PANEL ----------
-  const openPanel = async (dateString) => {
-    if (dateString) setSelectedDate(dateString);
-    if (staffId && (dateString || selectedDate)) {
-      try { await loadAvailability(dateString || selectedDate, staffId); } catch {}
-    }
-    setPanelOpen(true);
-    slide.setValue(1);
-    Animated.timing(slide, { toValue: 0, duration: 220, useNativeDriver: true }).start();
-  };
-
-  const closePanel = () => {
-    Animated.timing(slide, { toValue: 1, duration: 220, useNativeDriver: true }).start(({ finished }) => {
-      if (finished) setPanelOpen(false);
-    });
-  };
-
-  const translateX = useMemo(
-    () => slide.interpolate({ inputRange: [0, 1], outputRange: [0, panelWidth] }),
-    [slide, panelWidth]
+  return (
+    `${pad(d.getHours())}:` +
+    `${pad(d.getMinutes())}`
   );
+}
 
-  // ui parts
-  const Slot = ({ time }) => {
-    const active = selectedTime === time;
-    const isTaken = takenSlots.has(time);
-    const disabled = isTaken;
 
-    return (
-      <TouchableOpacity
-        disabled={disabled}
-        onPress={() => setSelectedTime(time)}
+function sameLocalDate(
+  dateValue,
+  dateString
+) {
+  const d =
+    new Date(dateValue);
+
+  return (
+    `${d.getFullYear()}-` +
+    `${pad(d.getMonth() + 1)}-` +
+    `${pad(d.getDate())}`
+  ) === dateString;
+}
+
+
+async function fetchOk(
+  url,
+  options
+) {
+  const response =
+    await fetch(
+      url,
+      options
+    );
+
+  if (!response.ok) {
+    const text =
+      await response.text();
+
+    throw new Error(
+      `${response.status} ${text}`
+    );
+  }
+
+  return response;
+}
+
+
+/* =========================================================
+   SMALL COMPONENTS
+========================================================= */
+
+function Button({
+  title,
+  onPress,
+  secondary = false,
+  danger = false,
+  disabled = false,
+  style,
+}) {
+  return (
+    <TouchableOpacity
+      activeOpacity={0.82}
+      onPress={onPress}
+      disabled={disabled}
+
+      style={[
+        {
+          minHeight:
+            46,
+
+          paddingHorizontal:
+            16,
+
+          borderRadius:
+            RADIUS.medium,
+
+          backgroundColor:
+            COLORS.royal,
+
+          alignItems:
+            'center',
+
+          justifyContent:
+            'center',
+        },
+
+        secondary && {
+          backgroundColor:
+            COLORS.white,
+
+          borderWidth:
+            1,
+
+          borderColor:
+            COLORS.border,
+        },
+
+        danger && {
+          backgroundColor:
+            COLORS.dangerSoft,
+
+          borderWidth:
+            1,
+
+          borderColor:
+            COLORS.danger,
+        },
+
+        disabled && {
+          opacity:
+            0.45,
+        },
+
+        style,
+      ]}
+    >
+      <Text
         style={{
-          paddingVertical: 10, paddingHorizontal: 12, margin: 6,
-          borderRadius: 8, borderWidth: 1,
-          backgroundColor: disabled ? '#2a2a33' : active ? '#111827' : '#1b1b22',
-          borderColor: disabled ? '#2a2a33' : active ? '#111827' : '#2a2a33',
-          opacity: disabled ? 0.5 : 1,
+          color:
+            danger
+              ? COLORS.danger
+              : secondary
+              ? COLORS.royal
+              : COLORS.white,
+
+          fontSize:
+            13,
+
+          fontWeight:
+            '900',
         }}
       >
-        <Text style={{ color: disabled ? '#9aa0a6' : (active ? '#fff' : '#e4e6eb') }}>
-          {time}{disabled ? ' • taken' : ''}
+        {title}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
+
+function Label({
+  children,
+}) {
+  return (
+    <Text
+      style={{
+        color:
+          COLORS.text,
+
+        fontSize:
+          12,
+
+        fontWeight:
+          '800',
+
+        marginBottom:
+          7,
+      }}
+    >
+      {children}
+    </Text>
+  );
+}
+
+
+function Input({
+  style,
+  ...props
+}) {
+  return (
+    <TextInput
+      placeholderTextColor={
+        COLORS.textMuted
+      }
+
+      selectionColor={
+        COLORS.royal
+      }
+
+      style={[
+        {
+          minHeight:
+            50,
+
+          borderWidth:
+            1,
+
+          borderColor:
+            COLORS.border,
+
+          backgroundColor:
+            COLORS.white,
+
+          borderRadius:
+            RADIUS.medium,
+
+          paddingHorizontal:
+            14,
+
+          color:
+            COLORS.text,
+
+          fontSize:
+            15,
+        },
+
+        style,
+      ]}
+
+      {...props}
+    />
+  );
+}
+
+
+function SelectButton({
+  label,
+  value,
+  placeholder,
+  onPress,
+  disabled = false,
+}) {
+  return (
+    <View
+      style={{
+        marginBottom:
+          15,
+      }}
+    >
+      <Label>
+        {label}
+      </Label>
+
+      <TouchableOpacity
+        activeOpacity={0.8}
+        onPress={onPress}
+        disabled={disabled}
+
+        style={{
+          minHeight:
+            52,
+
+          borderWidth:
+            1,
+
+          borderColor:
+            COLORS.border,
+
+          backgroundColor:
+            disabled
+              ? COLORS.surfaceSoft
+              : COLORS.white,
+
+          borderRadius:
+            RADIUS.medium,
+
+          paddingHorizontal:
+            14,
+
+          flexDirection:
+            'row',
+
+          alignItems:
+            'center',
+
+          justifyContent:
+            'space-between',
+
+          opacity:
+            disabled
+              ? 0.55
+              : 1,
+        }}
+      >
+        <Text
+          numberOfLines={1}
+
+          style={{
+            flex:
+              1,
+
+            color:
+              value
+                ? COLORS.text
+                : COLORS.textMuted,
+
+            fontSize:
+              15,
+
+            fontWeight:
+              value
+                ? '600'
+                : '400',
+          }}
+        >
+          {
+            value ||
+            placeholder
+          }
+        </Text>
+
+        <Text
+          style={{
+            color:
+              COLORS.royal,
+
+            fontSize:
+              18,
+
+            marginLeft:
+              10,
+          }}
+        >
+          ›
         </Text>
       </TouchableOpacity>
+    </View>
+  );
+}
+
+
+function PickerModal({
+  visible,
+  title,
+  items,
+  selectedValue,
+  onSelect,
+  onClose,
+  emptyText = 'No options available.',
+}) {
+  return (
+    <Modal
+      visible={
+        visible
+      }
+
+      transparent
+
+      animationType="fade"
+
+      onRequestClose={
+        onClose
+      }
+    >
+      <Pressable
+        onPress={
+          onClose
+        }
+
+        style={{
+          flex:
+            1,
+
+          backgroundColor:
+            'rgba(16,24,40,0.40)',
+
+          justifyContent:
+            'flex-end',
+        }}
+      >
+        <Pressable
+          onPress={() => {}}
+
+          style={{
+            backgroundColor:
+              COLORS.white,
+
+            borderTopLeftRadius:
+              26,
+
+            borderTopRightRadius:
+              26,
+
+            paddingTop:
+              10,
+
+            paddingHorizontal:
+              18,
+
+            paddingBottom:
+              24,
+
+            maxHeight:
+              '80%',
+          }}
+        >
+          <View
+            style={{
+              width:
+                42,
+
+              height:
+                5,
+
+              borderRadius:
+                5,
+
+              backgroundColor:
+                COLORS.borderStrong,
+
+              alignSelf:
+                'center',
+
+              marginBottom:
+                18,
+            }}
+          />
+
+          <View
+            style={{
+              flexDirection:
+                'row',
+
+              alignItems:
+                'center',
+
+              justifyContent:
+                'space-between',
+
+              marginBottom:
+                16,
+            }}
+          >
+            <Text
+              style={{
+                color:
+                  COLORS.text,
+
+                fontSize:
+                  20,
+
+                fontWeight:
+                  '800',
+              }}
+            >
+              {title}
+            </Text>
+
+            <TouchableOpacity
+              onPress={
+                onClose
+              }
+
+              style={{
+                width:
+                  38,
+
+                height:
+                  38,
+
+                borderRadius:
+                  19,
+
+                alignItems:
+                  'center',
+
+                justifyContent:
+                  'center',
+
+                backgroundColor:
+                  COLORS.surfaceSoft,
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    COLORS.text,
+
+                  fontSize:
+                    20,
+                }}
+              >
+                ×
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+
+            showsVerticalScrollIndicator={
+              false
+            }
+          >
+            {items.length ===
+            0 ? (
+              <View
+                style={{
+                  paddingVertical:
+                    30,
+
+                  alignItems:
+                    'center',
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      COLORS.textMuted,
+
+                    fontSize:
+                      14,
+                  }}
+                >
+                  {
+                    emptyText
+                  }
+                </Text>
+              </View>
+            ) : (
+              items.map(
+                (
+                  item,
+                  index
+                ) => {
+                  const active =
+                    item.value ===
+                    selectedValue;
+
+                  return (
+                    <TouchableOpacity
+                      key={
+                        String(
+                          item.value ??
+                          index
+                        )
+                      }
+
+                      activeOpacity={
+                        0.75
+                      }
+
+                      onPress={() => {
+                        onSelect(
+                          item.value
+                        );
+
+                        onClose();
+                      }}
+
+                      style={{
+                        minHeight:
+                          58,
+
+                        borderRadius:
+                          RADIUS.medium,
+
+                        paddingHorizontal:
+                          14,
+
+                        marginBottom:
+                          8,
+
+                        flexDirection:
+                          'row',
+
+                        alignItems:
+                          'center',
+
+                        backgroundColor:
+                          active
+                            ? COLORS.blueSoft
+                            : COLORS.white,
+
+                        borderWidth:
+                          1,
+
+                        borderColor:
+                          active
+                            ? COLORS.royal
+                            : COLORS.border,
+                      }}
+                    >
+                      <View
+                        style={{
+                          flex:
+                            1,
+                        }}
+                      >
+                                                <Text
+                          style={{
+                            color:
+                              active
+                                ? COLORS.royal
+                                : COLORS.text,
+
+                            fontSize:
+                              15,
+
+                            fontWeight:
+                              active
+                                ? '800'
+                                : '600',
+                          }}
+                        >
+                          {
+                            item.label
+                          }
+                        </Text>
+
+                        {!!item.subtitle && (
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textMuted,
+
+                              fontSize:
+                                12,
+
+                              marginTop:
+                                3,
+                            }}
+                          >
+                            {
+                              item.subtitle
+                            }
+                          </Text>
+                        )}
+                      </View>
+
+                      {active && (
+                        <View
+                          style={{
+                            width:
+                              22,
+
+                            height:
+                              22,
+
+                            borderRadius:
+                              11,
+
+                            alignItems:
+                              'center',
+
+                            justifyContent:
+                              'center',
+
+                            backgroundColor:
+                              COLORS.royal,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.white,
+
+                              fontWeight:
+                                '900',
+                            }}
+                          >
+                            ✓
+                          </Text>
+                        </View>
+                      )}
+                    </TouchableOpacity>
+                  );
+                }
+              )
+            )}
+          </ScrollView>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+
+/* =========================================================
+   MAIN SCREEN
+========================================================= */
+
+export default function AppointmentsScreen({
+  token,
+  me,
+}) {
+  const {
+    width,
+  } =
+    useWindowDimensions();
+
+
+  const isPhone =
+    width < 700;
+
+  const isDesktop =
+    width >= 1100;
+
+
+  const today =
+    localToday();
+
+
+  const canPickStaff =
+    me?.role === 'owner' ||
+    me?.role === 'receptionist';
+
+
+  const authHeaders =
+    useMemo(
+      () => ({
+        Authorization:
+          `Bearer ${token}`,
+
+        'Content-Type':
+          'application/json',
+      }),
+      [
+        token,
+      ]
+    );
+
+
+  const slots =
+    useMemo(
+      () =>
+        generateSlots(),
+      []
+    );
+
+
+  /* =====================================================
+     DATA
+  ===================================================== */
+
+  const [
+    appointments,
+    setAppointments,
+  ] =
+    useState([]);
+
+
+  const [
+    clients,
+    setClients,
+  ] =
+    useState([]);
+
+
+  const [
+    staff,
+    setStaff,
+  ] =
+    useState([]);
+
+
+  const [
+    specialties,
+    setSpecialties,
+  ] =
+    useState([]);
+
+
+  const [
+    services,
+    setServices,
+  ] =
+    useState([]);
+
+
+  const [
+    products,
+    setProducts,
+  ] =
+    useState([]);
+
+
+  const [
+    loading,
+    setLoading,
+  ] =
+    useState(true);
+
+
+  /* =====================================================
+     CALENDAR
+  ===================================================== */
+
+  const [
+    selectedDate,
+    setSelectedDate,
+  ] =
+    useState(today);
+
+
+  /*
+   * Calendar always remains visible.
+   * This only controls whether the detailed day
+   * schedule has been expanded underneath it.
+   */
+  const [
+    dayViewOpen,
+    setDayViewOpen,
+  ] =
+    useState(false);
+
+
+  const [
+    selectedDayAppointment,
+    setSelectedDayAppointment,
+  ] =
+    useState(null);
+
+
+  /* =====================================================
+     CREATE APPOINTMENT
+  ===================================================== */
+
+  const [
+    createOpen,
+    setCreateOpen,
+  ] =
+    useState(false);
+
+
+  const [
+    phoneDepositProcessing,
+    setPhoneDepositProcessing,
+  ] =
+    useState(false);
+
+
+  const [
+    phoneDepositStep,
+    setPhoneDepositStep,
+  ] =
+    useState('');
+
+
+  const [
+    bookingSource,
+    setBookingSource,
+  ] =
+    useState('phone');
+
+
+  const [
+    groupedBookingItems,
+    setGroupedBookingItems,
+  ] =
+    useState([]);
+
+
+  const [
+    clientId,
+    setClientId,
+  ] =
+    useState(null);
+
+
+  const [
+    specialtySlug,
+    setSpecialtySlug,
+  ] =
+    useState('');
+
+
+  const [
+    staffId,
+    setStaffId,
+  ] =
+    useState(
+      canPickStaff
+        ? null
+        : me?.id || null
+    );
+
+
+  const [
+    serviceId,
+    setServiceId,
+  ] =
+    useState(null);
+
+
+  const [
+    selectedTime,
+    setSelectedTime,
+  ] =
+    useState(null);
+
+
+  const [
+    hours,
+    setHours,
+  ] =
+    useState('0');
+
+
+  const [
+    minutesOverride,
+    setMinutesOverride,
+  ] =
+    useState('30');
+
+
+  const [
+    price,
+    setPrice,
+  ] =
+    useState('0');
+
+
+  /* =====================================================
+     NEW CLIENT
+  ===================================================== */
+
+  const [
+    addingClient,
+    setAddingClient,
+  ] =
+    useState(false);
+
+
+  const [
+    firstName,
+    setFirstName,
+  ] =
+    useState('');
+
+
+  const [
+    lastName,
+    setLastName,
+  ] =
+    useState('');
+
+
+  const [
+    phone,
+    setPhone,
+  ] =
+    useState('');
+
+
+  const [
+    email,
+    setEmail,
+  ] =
+    useState('');
+
+
+  /* =====================================================
+     PICKERS
+  ===================================================== */
+
+  const [
+    clientPickerOpen,
+    setClientPickerOpen,
+  ] =
+    useState(false);
+
+
+  const [
+    specialtyPickerOpen,
+    setSpecialtyPickerOpen,
+  ] =
+    useState(false);
+
+
+  const [
+    staffPickerOpen,
+    setStaffPickerOpen,
+  ] =
+    useState(false);
+
+
+  const [
+    servicePickerOpen,
+    setServicePickerOpen,
+  ] =
+    useState(false);
+
+
+  const [
+    productPickerOpen,
+    setProductPickerOpen,
+  ] =
+    useState(false);
+
+
+  /* =====================================================
+     EDIT APPOINTMENT
+  ===================================================== */
+
+  const [
+    editOpen,
+    setEditOpen,
+  ] =
+    useState(false);
+
+
+  const [
+    deleteConfirmOpen,
+    setDeleteConfirmOpen,
+  ] =
+    useState(false);
+
+
+  const [
+    appointmentToDelete,
+    setAppointmentToDelete,
+  ] =
+    useState(null);
+
+
+  const [
+    cancellingAppointment,
+    setCancellingAppointment,
+  ] =
+    useState(false);
+
+
+  const [
+    editingAppointment,
+    setEditingAppointment,
+  ] =
+    useState(null);
+
+
+  const [
+    editDate,
+    setEditDate,
+  ] =
+    useState('');
+
+
+  const [
+    editTime,
+    setEditTime,
+  ] =
+    useState('');
+
+
+  const [
+    editHours,
+    setEditHours,
+  ] =
+    useState('0');
+
+
+  const [
+    editMinutes,
+    setEditMinutes,
+  ] =
+    useState('30');
+
+
+  const [
+    editPrice,
+    setEditPrice,
+  ] =
+    useState('0');
+
+
+  const [
+    editTip,
+    setEditTip,
+  ] =
+    useState('0');
+
+
+  const [
+    editServiceName,
+    setEditServiceName,
+  ] =
+    useState('');
+
+
+  const [
+    editNotes,
+    setEditNotes,
+  ] =
+    useState('');
+
+
+    const [
+      addProdId,
+      setAddProdId,
+    ] =
+      useState(null);
+    
+    
+    const [
+      addSellerId,
+      setAddSellerId,
+    ] =
+      useState(null);
+    
+    
+    const [
+      sellerPickerOpen,
+      setSellerPickerOpen,
+    ] =
+      useState(false);
+    
+    
+    const [
+      addQty,
+      setAddQty,
+    ] =
+      useState('1');
+
+
+  const [
+    addingProduct,
+    setAddingProduct,
+  ] =
+    useState(false);
+
+
+  const [
+    productAddedMessage,
+    setProductAddedMessage,
+  ] =
+    useState('');
+
+
+  const [
+    saleSellerPickerOpen,
+    setSaleSellerPickerOpen,
+  ] =
+    useState(false);
+
+
+  const [
+    saleSellerTarget,
+    setSaleSellerTarget,
+  ] =
+    useState(null);
+
+
+  const [
+    updatingSaleSeller,
+    setUpdatingSaleSeller,
+  ] =
+    useState(false);
+
+
+  const [
+    productAdded,
+    setProductAdded,
+  ] =
+    useState(false);
+
+
+  const [
+    appointmentSales,
+    setAppointmentSales,
+  ] =
+    useState([]);
+
+
+  const [
+    appointmentSalesLoading,
+    setAppointmentSalesLoading,
+  ] =
+    useState(false);
+
+
+  /* =====================================================
+     RECEPTIONIST CHECKOUT
+  ===================================================== */
+
+  const [
+    checkoutOpen,
+    setCheckoutOpen,
+  ] =
+    useState(false);
+
+
+  const [
+    checkoutAppointment,
+    setCheckoutAppointment,
+  ] =
+    useState(null);
+
+
+  const [
+    paymentSummary,
+    setPaymentSummary,
+  ] =
+    useState(null);
+
+
+  const [
+    groupPaymentSummary,
+    setGroupPaymentSummary,
+  ] =
+    useState(null);
+
+
+  const [
+    groupTipChoices,
+    setGroupTipChoices,
+  ] =
+    useState({});
+
+
+  const [
+    paymentLoading,
+    setPaymentLoading,
+  ] =
+    useState(false);
+
+
+  const [
+    paymentSubmitting,
+    setPaymentSubmitting,
+  ] =
+    useState(false);
+
+
+  const [
+    checkoutTipChoice,
+    setCheckoutTipChoice,
+  ] =
+    useState('none');
+
+
+  const [
+    customTip,
+    setCustomTip,
+  ] =
+    useState('');
+
+
+  const [
+    paymentMethod,
+    setPaymentMethod,
+  ] =
+    useState('card');
+
+
+  /* =====================================================
+     REFUNDS
+  ===================================================== */
+
+  const [
+    refundOpen,
+    setRefundOpen,
+  ] =
+    useState(false);
+
+
+  const [
+    refundAppointment,
+    setRefundAppointment,
+  ] =
+    useState(null);
+
+
+  const [
+    refundSummary,
+    setRefundSummary,
+  ] =
+    useState(null);
+
+
+  const [
+    refundService,
+    setRefundService,
+  ] =
+    useState(false);
+
+
+  const [
+    refundTip,
+    setRefundTip,
+  ] =
+    useState(false);
+
+
+  const [
+    refundSaleIds,
+    setRefundSaleIds,
+  ] =
+    useState([]);
+
+
+  const [
+    refundReason,
+    setRefundReason,
+  ] =
+    useState('');
+
+
+  const [
+    refundLoading,
+    setRefundLoading,
+  ] =
+    useState(false);
+
+
+  const [
+    refundSubmitting,
+    setRefundSubmitting,
+  ] =
+    useState(false);
+
+
+  const refundProducts =
+    refundSummary?.products ||
+    [];
+
+
+  const refundableProducts =
+    refundProducts.filter(
+      (
+        item
+      ) =>
+        !(
+          refundSummary
+            ?.refunded_sale_ids ||
+          []
+        ).includes(
+          item.sale_id
+        )
+    );
+
+
+  const selectedRefundProducts =
+    refundProducts.filter(
+      (
+        item
+      ) =>
+        refundSaleIds.includes(
+          item.sale_id
+        )
+    );
+
+
+  const selectedRefundServiceTotal =
+    refundService
+      ? (
+          Number(
+            refundSummary
+              ?.service_subtotal ||
+            0
+          ) +
+          Number(
+            refundSummary
+              ?.service_tax ||
+            0
+          )
+        )
+      : 0;
+
+
+  const selectedRefundProductsTotal =
+    selectedRefundProducts.reduce(
+      (
+        total,
+        item
+      ) =>
+        total +
+        Number(
+          item.subtotal ||
+          0
+        ) +
+        Number(
+          item.tax ||
+          item.tax_amount ||
+          0
+        ),
+      0
+    );
+
+
+  const selectedRefundTipTotal =
+    refundTip
+      ? (
+          Number(
+            refundSummary
+              ?.tip ||
+            0
+          ) +
+          Number(
+            refundSummary
+              ?.tip_tax ||
+            0
+          )
+        )
+      : 0;
+
+
+  const selectedRefundTotal =
+    selectedRefundServiceTotal +
+    selectedRefundProductsTotal +
+    selectedRefundTipTotal;
+
+
+  const checkoutTipBase =
+    Number(
+      paymentSummary?.subtotal ||
+      0
+    );
+
+
+  const checkoutTipAmount =
+    checkoutTipChoice === 'custom'
+      ? Math.max(
+          0,
+          Number(
+            customTip ||
+            0
+          ) ||
+          0
+        )
+      : checkoutTipChoice === '15'
+      ? checkoutTipBase * 0.15
+      : checkoutTipChoice === '20'
+      ? checkoutTipBase * 0.20
+      : checkoutTipChoice === '25'
+      ? checkoutTipBase * 0.25
+      : 0;
+
+
+  const checkoutTipTax =
+    checkoutTipAmount *
+    Number(
+      paymentSummary?.tip_tax_rate ||
+      0
+    );
+
+
+  const checkoutGrandTotal =
+    Number(
+      paymentSummary?.service_subtotal ||
+      0
+    ) +
+    Number(
+      paymentSummary?.product_subtotal ||
+      0
+    ) +
+    Number(
+      paymentSummary?.service_tax ||
+      0
+    ) +
+    Number(
+      paymentSummary?.product_tax ||
+      0
+    ) +
+    checkoutTipAmount +
+    checkoutTipTax;
+
+
+  const checkoutAmountDue =
+    Math.max(
+      0,
+      checkoutGrandTotal -
+      Number(
+        paymentSummary?.paid_total ||
+        0
+      )
+    );
+
+
+  const groupTipAmountForItem =
+    (
+      item
+    ) => {
+      const setting =
+        groupTipChoices[
+          String(
+            item.appointment_id
+          )
+        ] || {
+          choice:
+            'none',
+
+          custom:
+            '',
+        };
+
+      const tipBase =
+        Number(
+          item.service_subtotal ||
+          0
+        ) +
+        Number(
+          item.product_subtotal ||
+          0
+        );
+
+      if (
+        setting.choice ===
+        'custom'
+      ) {
+        return Math.max(
+          0,
+          Number(
+            setting.custom ||
+            0
+          ) ||
+          0
+        );
+      }
+
+      if (
+        setting.choice ===
+        '15'
+      ) {
+        return (
+          tipBase *
+          0.15
+        );
+      }
+
+      if (
+        setting.choice ===
+        '20'
+      ) {
+        return (
+          tipBase *
+          0.20
+        );
+      }
+
+      if (
+        setting.choice ===
+        '25'
+      ) {
+        return (
+          tipBase *
+          0.25
+        );
+      }
+
+      return 0;
+    };
+
+
+  const groupAmountDueForItem =
+    (
+      item
+    ) => {
+      const tip =
+        groupTipAmountForItem(
+          item
+        );
+
+      const tipTax =
+        tip *
+        Number(
+          item.tip_tax_rate ||
+          0
+        );
+
+      const total =
+        Number(
+          item.service_subtotal ||
+          0
+        ) +
+        Number(
+          item.product_subtotal ||
+          0
+        ) +
+        Number(
+          item.service_tax ||
+          0
+        ) +
+        Number(
+          item.product_tax ||
+          0
+        ) +
+        tip +
+        tipTax;
+
+      return Math.max(
+        0,
+        total -
+        Number(
+          item.paid_total ||
+          0
+        )
+      );
+    };
+
+
+  const groupCheckoutAmountDue =
+    (
+      groupPaymentSummary?.items ||
+      []
+    ).reduce(
+      (
+        total,
+        item
+      ) =>
+        total +
+        groupAmountDueForItem(
+          item
+        ),
+      0
+    );
+
+
+  const buildGroupTipsPayload =
+    () => {
+      const tips = {};
+
+      (
+        groupPaymentSummary?.items ||
+        []
+      ).forEach(
+        (
+          item
+        ) => {
+          tips[
+            item.appointment_id
+          ] =
+            Math.max(
+              0,
+              Math.round(
+                groupTipAmountForItem(
+                  item
+                ) *
+                100
+              )
+            );
+        }
+      );
+
+      return tips;
+    };
+
+
+  /* =====================================================
+     SELECTED VALUES
+  ===================================================== */
+
+  const selectedClient =
+    clients.find(
+      (
+        item
+      ) =>
+        item.id ===
+        clientId
+    ) ||
+    null;
+
+
+  const canSelectBookingStaff =
+    canPickStaff ||
+    groupedBookingItems.length > 0;
+
+
+  const selectedStaff =
+    canSelectBookingStaff
+      ? (
+          staff.find(
+            (
+              item
+            ) =>
+              item.id ===
+              staffId
+          ) ||
+          null
+        )
+      : me;
+
+
+  const selectedService =
+    services.find(
+      (
+        item
+      ) =>
+        item.id ===
+        serviceId
+    ) ||
+    null;
+
+
+  const specialtyLabel =
+    specialties.find(
+      (
+        item
+      ) =>
+        item.slug ===
+        specialtySlug
+    )?.label ||
+    specialtySlug ||
+    '';
+
+
+  /* =====================================================
+     LOAD DATA
+  ===================================================== */
+
+  const loadAppointments =
+    async () => {
+      const response =
+        await fetchOk(
+          `${API_BASE_URL}/appointments/`,
+          {
+            headers:
+              authHeaders,
+          }
+        );
+
+      const data =
+        await response.json();
+
+      setAppointments(
+        Array.isArray(data)
+          ? data.filter(
+              (appointment) =>
+                ![
+                  'cancelled',
+                  'late_cancelled',
+                ].includes(
+                  appointment.booking_status
+                )
+            )
+          : []
+      );
+    };
+
+
+  const loadClients =
+    async () => {
+      const url =
+        new URL(
+          `${API_BASE_URL}/clients/search`
+        );
+
+      url.searchParams.set(
+        'limit',
+        '200'
+      );
+
+      const response =
+        await fetchOk(
+          url.toString(),
+          {
+            headers:
+              authHeaders,
+          }
+        );
+
+      const data =
+        await response.json();
+
+      setClients(
+        Array.isArray(data)
+          ? data
+          : []
+      );
+    };
+
+
+    const loadStaff =
+  async () => {
+    const response =
+      await fetchOk(
+        `${API_BASE_URL}/appointments/schedule-staff`,
+        {
+          headers:
+            authHeaders,
+        }
+      );
+
+    const data =
+      await response.json();
+
+    setStaff(
+      Array.isArray(data)
+        ? data
+        : []
     );
   };
 
-  const filteredClients = useMemo(() => {
-    const q = clientSearch.trim().toLowerCase();
-    if (!q) return clients;
-    return clients.filter(c => {
-      const name = `${c.first_name} ${c.last_name}`.toLowerCase();
-      return name.includes(q) || (c.phone || '').toLowerCase().includes(q) || (c.email || '').toLowerCase().includes(q);
-    });
-  }, [clients, clientSearch]);
 
-  const getClientName = (id) => {
-    const c = clients.find(x => x.id === id);
-    return c ? `${c.first_name} ${c.last_name}` : `Client #${id}`;
-  };
-  const getStaffName = (id) => {
-    if (canPickStaff) {
-      const s = staff.find(x => x.id === id);
-      return s ? s.name : `Staff #${id}`;
-    }
-    if (me?.id === id && me?.name) return me.name;
-    return `Staff #${id}`;
-  };
+  const loadSpecialties =
+    async () => {
+      const response =
+        await fetchOk(
+          `${API_BASE_URL}/public/specialties`
+        );
 
-  // --------- SIDEBAR CONTENT ----------
-  const SidebarContent = (
-    <View style={{ flex: 1, backgroundColor: '#0d0f16' }}>
-      {/* Header */}
-      <View style={{ padding: 14, paddingTop: 18, borderBottomWidth: 1, borderBottomColor: '#222635', backgroundColor: '#0d0f16' }}>
-        <Text style={{ color: '#fff', fontSize: 18, fontWeight: '700' }}>Create a new appointment</Text>
-        <Text style={{ color: '#9aa0a6', marginTop: 2 }}>For {selectedDate}</Text>
-      </View>
+      const data =
+        await response.json();
 
-      {/* Scrollable body */}
-      <ScrollView
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
-        showsVerticalScrollIndicator
-        contentContainerStyle={{ padding: 16, paddingBottom: 120 }}
-      >
-        {/* Client select / add */}
-        <Text style={{ fontWeight: '600', color: '#fff' }}>Client</Text>
-        <TextInput
-          value={clientSearch}
-          onChangeText={setClientSearch}
-          placeholder="Search clients by name/phone/email"
-          placeholderTextColor="#7a7f88"
-          style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 10, marginTop: 6 }}
-          returnKeyType="done"
-          onSubmitEditing={() => Keyboard.dismiss()}
-        />
-        {filteredClients.length > 0 ? (
-          <View style={{ borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, marginTop: 6, backgroundColor: '#14141a', minHeight: Platform.OS === 'ios' ? 180 : undefined }}>
-            <Picker
-              selectedValue={clientId}
-              onValueChange={(val) => setClientId(val)}
-              mode={Platform.OS === 'android' ? 'dropdown' : undefined}
-              dropdownIconColor="#f2f3f5"
-              style={{ color: '#f2f3f5', backgroundColor: '#14141a', height: Platform.OS === 'android' ? 48 : undefined }}
-              itemStyle={{ color: '#f2f3f5' }}
-            >
-              {filteredClients.map(c => (
-                <Picker.Item key={c.id} label={`${c.first_name} ${c.last_name}${c.phone ? ` • ${c.phone}` : ''}`} value={c.id} />
-              ))}
-            </Picker>
-          </View>
-        ) : (
-          <Text style={{ color: '#a9adb6', marginTop: 6 }}>No clients match. Add one below.</Text>
-        )}
+      setSpecialties(
+        Array.isArray(data)
+          ? data
+          : []
+      );
+    };
 
-        <View style={{ marginTop: 8, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
-          <Button
-            title={showAddClient ? "Hide Add Client" : "Add Client"}
-            onPress={() => setShowAddClient(v => !v)}
-            color={Platform.OS === 'ios' ? undefined : '#6b7280'}
-          />
-        </View>
 
-        {showAddClient && (
-          <View style={{ marginTop: 10, backgroundColor: '#14141a', borderRadius: 10, borderWidth: 1, borderColor: '#2a2a33', padding: 12 }}>
-            <Text style={{ color: '#fff', fontWeight: '600', marginBottom: 8 }}>New Client</Text>
+  const loadProducts =
+    async () => {
+      try {
+        const response =
+          await fetchOk(
+            `${API_BASE_URL}/products/`,
+            {
+              headers:
+                authHeaders,
+            }
+          );
 
-            <Text style={{ color: '#fff', marginBottom: 6 }}>First name</Text>
-            <TextInput value={firstName} onChangeText={setFirstName} placeholder="Jane" placeholderTextColor="#7a7f88"
-              style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginBottom: 10 }} />
+        const data =
+          await response.json();
 
-            <Text style={{ color: '#fff', marginBottom: 6 }}>Last name</Text>
-            <TextInput value={lastName} onChangeText={setLastName} placeholder="Doe" placeholderTextColor="#7a7f88"
-              style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginBottom: 10 }} />
+        setProducts(
+          Array.isArray(data)
+            ? data
+            : []
+        );
+      } catch {
+        setProducts([]);
+      }
+    };
+    const refresh =
+    async () => {
+      try {
+        setLoading(true);
 
-            <Text style={{ color: '#fff', marginBottom: 6 }}>Phone</Text>
-            <TextInput value={phone} onChangeText={setPhone} keyboardType="phone-pad" placeholder="555-123-4567" placeholderTextColor="#7a7f88"
-              style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginBottom: 10 }} />
+        const tasks = [
+          loadAppointments(),
+          loadClients(),
+          loadSpecialties(),
+          loadProducts(),
+          loadStaff(),
+        ];
+        
+        await Promise.all(
+          tasks
+        );
+      } catch (error) {
+        Alert.alert(
+          'Load error',
+          String(
+            error.message ||
+            error
+          )
+        );
+      } finally {
+        setLoading(false);
+      }
+    };
 
-            <Text style={{ color: '#fff', marginBottom: 6 }}>Email</Text>
-            <TextInput value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" placeholder="jane@example.com" placeholderTextColor="#7a7f88"
-              style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginBottom: 12 }}
-              returnKeyType="done" blurOnSubmit={true} onSubmitEditing={() => Keyboard.dismiss()} />
 
-            <View style={{ borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
-              <Button title="Create Client" onPress={createClient} color={Platform.OS === 'ios' ? undefined : '#3b82f6'} />
-            </View>
-          </View>
-        )}
-
-        {/* Staff (owner/receptionist) */}
-        {canPickStaff && (
-          <>
-            <Text style={{ fontWeight: '600', marginTop: 16, color: '#fff' }}>Staff</Text>
-            <View style={{ borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, marginTop: 6, backgroundColor: '#14141a', minHeight: Platform.OS === 'ios' ? 180 : undefined }}>
-              <Picker
-                selectedValue={staffId}
-                onValueChange={(val) => setStaffId(val)}
-                mode={Platform.OS === 'android' ? 'dropdown' : undefined}
-                dropdownIconColor="#f2f3f5"
-                style={{ color: '#f2f3f5', backgroundColor: '#14141a', height: Platform.OS === 'android' ? 48 : undefined }}
-                itemStyle={{ color: '#f2f3f5' }}
-              >
-                {staff
-                  .filter(s => !specialtySlug || (s.profession || '').toLowerCase() === specialtySlug.toLowerCase())
-                  .map(s => (
-                    <Picker.Item key={s.id} label={`${s.name}${s.email ? ` (${s.email})` : ''}`} value={s.id} />
-                  ))}
-              </Picker>
-            </View>
-          </>
-        )}
-
-        {/* Specialty */}
-        <Text style={{ fontWeight: '600', marginTop: 16, color: '#fff' }}>Specialty</Text>
-        <View style={{ borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, marginTop: 6, backgroundColor: '#14141a', minHeight: Platform.OS === 'ios' ? 180 : undefined }}>
-          <Picker
-            selectedValue={specialtySlug}
-            onValueChange={(val) => setSpecialtySlug(val)}
-            mode={Platform.OS === 'android' ? 'dropdown' : undefined}
-            dropdownIconColor="#f2f3f5"
-            style={{ color: '#f2f3f5', backgroundColor: '#14141a', height: Platform.OS === 'android' ? 48 : undefined }}
-            itemStyle={{ color: '#f2f3f5' }}
-          >
-            {specialties.map(s => <Picker.Item key={s.slug} label={s.label || s.slug} value={s.slug} />)}
-          </Picker>
-        </View>
-        <Text style={{ color: '#a9adb6', marginTop: 4 }}>Selected: {specialtyLabel || '—'}</Text>
-
-        {/* Service */}
-        <Text style={{ fontWeight: '600', marginTop: 12, color: '#fff' }}>Service</Text>
-        <View style={{ borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, marginTop: 6, backgroundColor: '#14141a', minHeight: Platform.OS === 'ios' ? 180 : undefined }}>
-          <Picker
-            selectedValue={serviceId}
-            onValueChange={(val) => {
-              setServiceId(val);
-              const meta = (services || []).find(s => s.id === val);
-              setHours("0");
-              setMinutesOverride(String(meta?.duration_minutes ?? 30));
-              setPrice(String(meta?.price ?? 0));
-            }}
-            mode={Platform.OS === 'android' ? 'dropdown' : undefined}
-            dropdownIconColor="#f2f3f5"
-            style={{ color: '#f2f3f5', backgroundColor: '#14141a', height: Platform.OS === 'android' ? 48 : undefined }}
-            itemStyle={{ color: '#f2f3f5' }}
-          >
-            {services.map(s => <Picker.Item key={s.id} label={`${s.name} (${s.duration_minutes} min)`} value={s.id} />)}
-          </Picker>
-        </View>
-        <Text style={{ color: '#a9adb6', marginTop: 4 }}>Selected: {selectedService?.name || '—'}</Text>
-
-        {/* Hours / Minutes / Price */}
-        <Text style={{ fontWeight: '600', marginTop: 12, color: '#fff' }}>Hours</Text>
-        <TextInput
-          value={hours}
-          onChangeText={setHours}
-          keyboardType="number-pad"
-          returnKeyType="done"
-          blurOnSubmit={true}
-          onSubmitEditing={() => Keyboard.dismiss()}
-          placeholder="0"
-          placeholderTextColor="#7a7f88"
-          style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginTop: 6 }}
-        />
-
-        <Text style={{ fontWeight: '600', marginTop: 12, color: '#fff' }}>Minutes</Text>
-        <TextInput
-          value={minutesOverride}
-          onChangeText={setMinutesOverride}
-          keyboardType="number-pad"
-          returnKeyType="done"
-          blurOnSubmit={true}
-          onSubmitEditing={() => Keyboard.dismiss()}
-          placeholder={`${selectedService?.duration_minutes ?? 30}`}
-          placeholderTextColor="#7a7f88"
-          style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginTop: 6 }}
-        />
-
-        <Text style={{ fontWeight: '600', marginTop: 12, color: '#fff' }}>Price ($)</Text>
-        <TextInput
-          value={price}
-          onChangeText={setPrice}
-          keyboardType="decimal-pad"
-          returnKeyType="done"
-          blurOnSubmit={true}
-          onSubmitEditing={() => Keyboard.dismiss()}
-          placeholder={`${selectedService?.price ?? 0}`}
-          placeholderTextColor="#7a7f88"
-          style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 12, marginTop: 6 }}
-        />
-
-        {/* Time slots */}
-        <Text style={{ fontWeight: '700', marginTop: 18, marginBottom: 6, color: '#fff' }}>Pick a time</Text>
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-          {slotsForDay.map((t) => <Slot key={t} time={t} />)}
-        </View>
-      </ScrollView>
-
-      {/* Sticky footer */}
-      <View
-        style={{
-          position: 'absolute',
-          left: 0, right: 0, bottom: 0,
-          padding: 12,
-          borderTopWidth: 1,
-          borderTopColor: '#222635',
-          backgroundColor: '#0d0f16'
-        }}
-      >
-        <View style={{ flexDirection: 'row', gap: 10 }}>
-          <View style={{ flex: 1, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
-            <Button title="Book" onPress={createAppointment} color={Platform.OS === 'ios' ? undefined : '#3b82f6'} />
-          </View>
-          <View style={{ width: 110, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
-            <Button title="Close" onPress={closePanel} color={Platform.OS === 'ios' ? undefined : '#6b7280'} />
-          </View>
-        </View>
-      </View>
-    </View>
+  useEffect(
+    () => {
+      refresh();
+    },
+    [
+      token,
+      me?.id,
+      me?.role,
+    ]
   );
 
-  // ---------- MAIN RENDER ----------
+
+  useEffect(
+    () => {
+      if (
+        !canPickStaff &&
+        me?.id
+      ) {
+        setStaffId(
+          me.id
+        );
+
+        if (
+          me.profession
+        ) {
+          setSpecialtySlug(
+            me.profession
+              .toLowerCase()
+          );
+        }
+      }
+    },
+    [
+      me?.id,
+      me?.profession,
+      canPickStaff,
+    ]
+  );
+
+
+  /* =====================================================
+     STRIPE RETURN REFRESH
+  ===================================================== */
+
+  useEffect(() => {
+    if (
+      Platform.OS !== 'web' ||
+      typeof window === 'undefined'
+    ) {
+      return;
+    }
+
+    const params =
+      new URLSearchParams(
+        window.location.search
+      );
+
+    const stripePayment =
+      params.get(
+        'stripe_payment'
+      );
+
+    const returnedAppointmentId =
+      Number(
+        params.get(
+          'appointment_id'
+        )
+      );
+
+
+    if (
+      stripePayment !==
+      'success'
+    ) {
+      return;
+    }
+
+
+    let cancelled =
+      false;
+
+    let attempts =
+      0;
+
+
+    const refreshAfterStripe =
+      async () => {
+        attempts +=
+          1;
+
+        try {
+          await loadAppointments();
+
+          if (
+            returnedAppointmentId
+          ) {
+            const response =
+              await fetch(
+                `${API_BASE_URL}/payments/appointment/${returnedAppointmentId}/summary`,
+                {
+                  headers:
+                    authHeaders,
+                }
+              );
+
+            if (
+              response.ok
+            ) {
+              const summary =
+                await response.json();
+
+              if (
+                summary
+                  ?.payment_status ===
+                'paid'
+              ) {
+                if (
+                  !cancelled
+                ) {
+                  await loadAppointments();
+
+                  const cleanUrl =
+                    window.location
+                      .origin +
+                    window.location
+                      .pathname;
+
+                  window.history
+                    .replaceState(
+                      {},
+                      '',
+                      cleanUrl
+                    );
+                }
+
+                return;
+              }
+            }
+          }
+        } catch (error) {
+          console.log(
+            'Stripe return refresh:',
+            error
+          );
+        }
+
+
+        if (
+          !cancelled &&
+          attempts < 6
+        ) {
+          setTimeout(
+            refreshAfterStripe,
+            1000
+          );
+        }
+      };
+
+
+    refreshAfterStripe();
+
+
+    return () => {
+      cancelled =
+        true;
+    };
+  }, [
+    token,
+  ]);
+
+
+  /* =====================================================
+     SPECIALTY -> SERVICES
+  ===================================================== */
+
+  useEffect(
+    () => {
+      (
+        async () => {
+          if (
+            !specialtySlug
+          ) {
+            setServices([]);
+            setServiceId(null);
+
+            if (
+              canPickStaff
+            ) {
+              setStaffId(null);
+            }
+
+            return;
+          }
+
+          try {
+            const response =
+              await fetchOk(
+                `${API_BASE_URL}/public/services?category=${encodeURIComponent(
+                  specialtySlug
+                )}`
+              );
+
+            const data =
+              await response.json();
+
+            const clean =
+              Array.isArray(data)
+                ? data
+                : [];
+
+            setServices(
+              clean
+            );
+
+            setServiceId(
+              null
+            );
+
+            setSelectedTime(
+              null
+            );
+
+            if (
+              canPickStaff
+            ) {
+              setStaffId(
+                null
+              );
+            }
+          } catch {
+            setServices([]);
+            setServiceId(null);
+          }
+        }
+      )();
+    },
+    [
+      specialtySlug,
+    ]
+  );
+
+
+  /* =====================================================
+     COMPATIBLE STAFF
+  ===================================================== */
+
+  const compatibleStaff =
+    useMemo(
+      () => {
+        if (
+          !specialtySlug
+        ) {
+          return [];
+        }
+
+        return staff.filter(
+          (
+            person
+          ) =>
+            (
+              person.profession ||
+              ''
+            )
+              .toLowerCase() ===
+            specialtySlug.toLowerCase()
+        );
+      },
+      [
+        staff,
+        specialtySlug,
+      ]
+    );
+
+
+  /* =====================================================
+     SERVICE CHANGED
+  ===================================================== */
+
+  useEffect(
+    () => {
+      if (
+        !selectedService
+      ) {
+        return;
+      }
+
+      const total =
+        Number(
+          selectedService.duration_minutes ||
+          30
+        );
+
+      setHours(
+        String(
+          Math.floor(
+            total / 60
+          )
+        )
+      );
+
+      setMinutesOverride(
+        String(
+          total % 60
+        )
+      );
+
+      setPrice(
+        String(
+          selectedService.price ||
+          0
+        )
+      );
+
+      setSelectedTime(
+        null
+      );
+    },
+    [
+      serviceId,
+    ]
+  );
+
+
+  /* =====================================================
+     CALENDAR DATA
+  ===================================================== */
+
+  const appointmentsForDate =
+    useMemo(
+      () =>
+        appointments
+          .filter(
+            (
+              appointment
+            ) =>
+              sameLocalDate(
+                appointment.start_time,
+                selectedDate
+              )
+          )
+          .sort(
+            (
+              a,
+              b
+            ) =>
+              new Date(
+                a.start_time
+              ) -
+              new Date(
+                b.start_time
+              )
+          ),
+      [
+        appointments,
+        selectedDate,
+      ]
+    );
+
+
+  const markedDates =
+    useMemo(
+      () => {
+        const marks = {};
+
+        appointments.forEach(
+          (
+            appointment
+          ) => {
+            const d =
+              new Date(
+                appointment.start_time
+              );
+
+            const key =
+              `${d.getFullYear()}-` +
+              `${pad(
+                d.getMonth() + 1
+              )}-` +
+              `${pad(
+                d.getDate()
+              )}`;
+
+            marks[key] = {
+              marked:
+                true,
+
+              dotColor:
+                COLORS.royal,
+            };
+          }
+        );
+
+        marks[selectedDate] = {
+          ...marks[
+            selectedDate
+          ],
+
+          selected:
+            true,
+
+          selectedColor:
+            COLORS.royal,
+
+          selectedTextColor:
+            COLORS.white,
+        };
+
+        return marks;
+      },
+      [
+        appointments,
+        selectedDate,
+      ]
+    );
+
+
+  /* =====================================================
+     STAFF SHOWN IN DAY VIEW
+
+     Owner/receptionist = all staff.
+     Staff = themselves.
+  ===================================================== */
+
+  const scheduleStaff =
+  useMemo(
+    () => {
+      const everyone =
+        Array.isArray(staff)
+          ? [...staff]
+          : [];
+
+      if (
+        me?.role === 'staff' &&
+        me?.id &&
+        !everyone.some(
+          (person) =>
+            person.id === me.id
+        )
+      ) {
+        everyone.push(
+          me
+        );
+      }
+
+      return everyone;
+    },
+    [
+      staff,
+      me,
+    ]
+  );
+
+  /* =====================================================
+     CLIENT / STAFF NAMES
+  ===================================================== */
+
+  const getClientName =
+    (
+      appointment
+    ) => {
+      const client =
+        clients.find(
+          (
+            item
+          ) =>
+            item.id ===
+            appointment.client_id
+        );
+
+      if (!client) {
+        return (
+          `Client #` +
+          appointment.client_id
+        );
+      }
+
+      return (
+        `${client.first_name || ''} ` +
+        `${client.last_name || ''}`
+      ).trim();
+    };
+
+
+  const getStaffName =
+    (
+      appointment
+    ) => {
+      if (
+        !canPickStaff &&
+        appointment.staff_id ===
+        me?.id
+      ) {
+        return me?.name;
+      }
+
+      return (
+        staff.find(
+          (
+            person
+          ) =>
+            person.id ===
+            appointment.staff_id
+        )?.name ||
+        `Staff #${appointment.staff_id}`
+      );
+    };
+
+
+  /* =====================================================
+     DAY VIEW HELPERS
+  ===================================================== */
+
+  const appointmentsForStaff =
+    (
+      employeeId
+    ) =>
+      appointmentsForDate.filter(
+        (
+          appointment
+        ) =>
+          appointment.staff_id ===
+          employeeId
+      );
+
+
+  const moveSelectedDay =
+    (
+      amount
+    ) => {
+      const [
+        year,
+        month,
+        day,
+      ] =
+        selectedDate
+          .split('-')
+          .map(Number);
+
+      const date =
+        new Date(
+          year,
+          month - 1,
+          day
+        );
+
+      date.setDate(
+        date.getDate() +
+        amount
+      );
+
+      const nextDate =
+        `${date.getFullYear()}-` +
+        `${pad(
+          date.getMonth() + 1
+        )}-` +
+        `${pad(
+          date.getDate()
+        )}`;
+
+      setSelectedDate(
+        nextDate
+      );
+
+      setSelectedTime(
+        null
+      );
+
+      setDayViewOpen(
+        true
+      );
+    };
+
+
+  const previousDay =
+    () =>
+      moveSelectedDay(-1);
+
+
+  const nextDay =
+    () =>
+      moveSelectedDay(1);
+
+
+  const appointmentStartingAt =
+    (
+      employeeId,
+      time
+    ) =>
+      appointmentsForStaff(
+        employeeId
+      ).find(
+        (
+          appointment
+        ) =>
+          getTimeKey(
+            appointment.start_time
+          ) === time
+      );
+
+
+  const appointmentCoveringSlot =
+    (
+      employeeId,
+      time
+    ) => {
+      const [
+        hour,
+        minute,
+      ] =
+        time
+          .split(':')
+          .map(Number);
+
+      const [
+        year,
+        month,
+        day,
+      ] =
+        selectedDate
+          .split('-')
+          .map(Number);
+
+      const slotStart =
+        new Date(
+          year,
+          month - 1,
+          day,
+          hour,
+          minute
+        );
+
+      return appointmentsForStaff(
+        employeeId
+      ).find(
+        (
+          appointment
+        ) => {
+          const start =
+            new Date(
+              appointment.start_time
+            );
+
+          const end =
+            new Date(
+              appointment.end_time
+            );
+
+          return (
+            slotStart >= start &&
+            slotStart < end
+          );
+        }
+      );
+    };
+
+
+  /* =====================================================
+     CREATE APPOINTMENT AVAILABILITY
+  ===================================================== */
+
+  const selectedDuration =
+    useMemo(
+      () => {
+        const manual =
+          (
+            parseInt(
+              hours || '0',
+              10
+            ) *
+            60
+          ) +
+          parseInt(
+            minutesOverride ||
+            '0',
+            10
+          );
+
+        return Math.max(
+          5,
+          manual ||
+          Number(
+            selectedService
+              ?.duration_minutes ||
+            30
+          )
+        );
+      },
+      [
+        hours,
+        minutesOverride,
+        selectedService,
+      ]
+    );
+
+
+  const isTimeAvailable =
+    (
+      time
+    ) => {
+      if (
+        !staffId ||
+        !selectedDate
+      ) {
+        return false;
+      }
+
+      const [
+        hour,
+        minute,
+      ] =
+        time
+          .split(':')
+          .map(Number);
+
+      const [
+        year,
+        month,
+        day,
+      ] =
+        selectedDate
+          .split('-')
+          .map(Number);
+
+      const start =
+        new Date(
+          year,
+          month - 1,
+          day,
+          hour,
+          minute
+        );
+
+      const end =
+        new Date(
+          start.getTime() +
+          selectedDuration *
+          60000
+        );
+
+      const close =
+        new Date(
+          year,
+          month - 1,
+          day,
+          CLOSE_TIME,
+          0
+        );
+
+      if (
+        end > close
+      ) {
+        return false;
+      }
+
+      const conflict =
+        appointments.some(
+          (
+            appointment
+          ) => {
+            if (
+              appointment.staff_id !==
+              staffId
+            ) {
+              return false;
+            }
+
+            const apptStart =
+              new Date(
+                appointment.start_time
+              );
+
+            const apptEnd =
+              new Date(
+                appointment.end_time
+              );
+
+            return (
+              start < apptEnd &&
+              end > apptStart
+            );
+          }
+        );
+
+      return !conflict;
+    };
+
+
+const availableTimes =
+  useMemo(
+    () => {
+      if (
+        !staffId ||
+        !selectedService
+      ) {
+        return [];
+      }
+
+      return slots.filter(
+        isTimeAvailable
+      );
+    },
+    [
+      slots,
+      staffId,
+      selectedDate,
+      selectedDuration,
+      selectedService,
+      appointments,
+    ]
+  );
+
+
+/* =====================================================
+   CREATE CLIENT
+===================================================== */
+
+const createClient =
+  async () => {
+    if (
+      !firstName.trim() ||
+      !lastName.trim()
+    ) {
+      return Alert.alert(
+        'Missing information',
+        'First and last name are required.'
+      );
+    }
+
+    try {
+      const response =
+        await fetchOk(
+          `${API_BASE_URL}/clients/`,
+          {
+            method:
+              'POST',
+
+            headers:
+              authHeaders,
+
+            body:
+              JSON.stringify(
+                {
+                  first_name:
+                    firstName.trim(),
+
+                  last_name:
+                    lastName.trim(),
+
+                  phone:
+                    phone.trim() ||
+                    null,
+
+                  email:
+                    email.trim() ||
+                    null,
+                }
+              ),
+          }
+        );
+
+      const created =
+        await response.json();
+
+      await loadClients();
+
+      setClientId(
+        created.id
+      );
+
+      setFirstName('');
+      setLastName('');
+      setPhone('');
+      setEmail('');
+
+      setAddingClient(
+        false
+      );
+
+      Alert.alert(
+        'Client added',
+        'The new client is selected.'
+      );
+    } catch (error) {
+      Alert.alert(
+        'Could not add client',
+        String(
+          error.message ||
+          error
+        )
+      );
+    }
+  };
+
+
+const buildBookingItem =
+  () => {
+    const start =
+      `${selectedDate}T${selectedTime}:00`;
+
+    return {
+      staff_id:
+        Number(
+          staffId
+        ),
+
+      staff_name:
+        selectedStaff?.name ||
+        me?.name ||
+        'Professional',
+
+      service_id:
+        Number(
+          selectedService.id
+        ),
+
+      service_name:
+        selectedService.name,
+
+      start_time:
+        start,
+
+      end_time:
+        addMinutesLocal(
+          start,
+          selectedDuration
+        ),
+
+      date:
+        selectedDate,
+
+      time:
+        selectedTime,
+
+      notes:
+        `${specialtyLabel}` +
+        ` | $${Number(
+          price || 0
+        ).toFixed(2)}` +
+        ` | ${selectedDuration} min`,
+
+      price:
+        Number(
+          price ||
+          0
+        ),
+
+      duration:
+        selectedDuration,
+    };
+  };
+
+
+const validateGroupItem =
+  () => {
+    if (
+      !clientId ||
+      !specialtySlug ||
+      !staffId ||
+      !selectedService ||
+      !selectedTime
+    ) {
+      Alert.alert(
+        'Complete appointment',
+        'Choose the client, specialty, professional, service and time.'
+      );
+
+      return false;
+    }
+
+    if (
+      !isTimeAvailable(
+        selectedTime
+      )
+    ) {
+      Alert.alert(
+        'Time unavailable',
+        'The full service no longer fits at this time.'
+      );
+
+      return false;
+    }
+
+    if (
+      groupedBookingItems.some(
+        (item) =>
+          item.staff_id ===
+          Number(
+            staffId
+          )
+      )
+    ) {
+      Alert.alert(
+        'Choose another professional',
+        'The same professional cannot perform two services at the same time.'
+      );
+
+      return false;
+    }
+
+    if (
+      groupedBookingItems.length > 0 &&
+      (
+        selectedDate !==
+          groupedBookingItems[0].date ||
+        selectedTime !==
+          groupedBookingItems[0].time
+      )
+    ) {
+      Alert.alert(
+        'Same time required',
+        'All services must start on the same date and time.'
+      );
+
+      return false;
+    }
+
+    return true;
+  };
+
+
+const addAnotherBookingService =
+  () => {
+    if (
+      phoneDepositProcessing ||
+      !validateGroupItem()
+    ) {
+      return;
+    }
+
+    setGroupedBookingItems(
+      (
+        current
+      ) => [
+        ...current,
+        buildBookingItem(),
+      ]
+    );
+
+    setSpecialtySlug('');
+    setStaffId(null);
+    setServiceId(null);
+    setSelectedTime(null);
+
+    setHours('0');
+    setMinutesOverride('30');
+    setPrice('0');
+
+    setSpecialtyPickerOpen(
+      true
+    );
+  };
+
+
+const createGroupedAppointments =
+  async (
+    isWalkIn
+  ) => {
+    if (!validateGroupItem()) {
+      return;
+    }
+
+    const items = [
+      ...groupedBookingItems,
+      buildBookingItem(),
+    ];
+
+    try {
+      setPhoneDepositProcessing(
+        true
+      );
+
+      setPhoneDepositStep(
+        isWalkIn
+          ? 'Creating grouped walk-in...'
+          : 'Creating grouped appointment hold...'
+      );
+
+      const response =
+        await fetchOk(
+          `${API_BASE_URL}/appointments/group`,
+          {
+            method:
+              'POST',
+
+            headers:
+              authHeaders,
+
+            body:
+              JSON.stringify(
+                {
+                  client_id:
+                    Number(
+                      clientId
+                    ),
+
+                  booking_source:
+                    isWalkIn
+                      ? 'walk_in'
+                      : 'phone',
+
+                  appointments:
+                    items.map(
+                      (item) => ({
+                        staff_id:
+                          item.staff_id,
+
+                        service_id:
+                          item.service_id,
+
+                        start_time:
+                          item.start_time,
+
+                        end_time:
+                          item.end_time,
+
+                        notes:
+                          item.notes,
+
+                        price:
+                          item.price,
+
+                        tip:
+                          0,
+                      })
+                    ),
+                }
+              ),
+          }
+        );
+
+      const grouped =
+        await response.json();
+
+
+      if (!isWalkIn) {
+        const deposit =
+          Number(
+            grouped?.deposit_amount ||
+            0
+          );
+
+        setPhoneDepositStep(
+          `Collecting $${deposit.toFixed(
+            2
+          )} combined deposit...`
+        );
+
+        await fetchOk(
+          `${API_BASE_URL}/payments/booking-group/${grouped.booking_group_id}/moto-deposit/start`,
+          {
+            method:
+              'POST',
+
+            headers:
+              authHeaders,
+          }
+        );
+
+        setPhoneDepositStep(
+          'Waiting for Stripe reader...'
+        );
+
+        let complete =
+          false;
+
+        for (
+          let attempt = 0;
+          attempt < 120;
+          attempt += 1
+        ) {
+          await new Promise(
+            (resolve) =>
+              setTimeout(
+                resolve,
+                1000
+              )
+          );
+
+          const statusResponse =
+            await fetchOk(
+              `${API_BASE_URL}/payments/booking-group/${grouped.booking_group_id}/moto-deposit/status`,
+              {
+                headers:
+                  authHeaders,
+              }
+            );
+
+          const status =
+            await statusResponse.json();
+
+          if (
+            status?.complete &&
+            status?.booking_status ===
+              'confirmed'
+          ) {
+            complete =
+              true;
+
+            break;
+          }
+
+          if (
+            status?.ok ===
+            false
+          ) {
+            throw new Error(
+              status?.error ||
+              'The combined deposit was not completed.'
+            );
+          }
+
+          setPhoneDepositStep(
+            'Confirming combined deposit...'
+          );
+        }
+
+        if (!complete) {
+          throw new Error(
+            'Stripe is still processing the combined deposit.'
+          );
+        }
+      }
+
+      await loadAppointments();
+
+      setGroupedBookingItems([]);
+      setSelectedTime(null);
+      setCreateOpen(false);
+      setDayViewOpen(true);
+
+    } catch (error) {
+      await loadAppointments();
+
+      Alert.alert(
+        isWalkIn
+          ? 'Grouped walk-in failed'
+          : 'Combined deposit not completed',
+
+        String(
+          error?.message ||
+          error
+        )
+      );
+
+    } finally {
+      setPhoneDepositProcessing(
+        false
+      );
+
+      setPhoneDepositStep('');
+    }
+  };
+
+
+/* =====================================================
+   CREATE APPOINTMENT
+===================================================== */
+
+const createAppointment =
+  async () => {
+    const isWalkIn =
+      canPickStaff &&
+      bookingSource === 'walk_in';
+
+    if (phoneDepositProcessing) {
+      return;
+    }
+
+    if (!clientId) {
+      return Alert.alert(
+        'Select client',
+        'Choose a client first.'
+      );
+    }
+
+    if (!specialtySlug) {
+      return Alert.alert(
+        'Select specialty',
+        'Choose a specialty.'
+      );
+    }
+
+    if (!staffId) {
+      return Alert.alert(
+        'Select professional',
+        'Choose a professional.'
+      );
+    }
+
+    if (!selectedService) {
+      return Alert.alert(
+        'Select service',
+        'Choose a service.'
+      );
+    }
+
+    if (!selectedTime) {
+      return Alert.alert(
+        'Select time',
+        'Choose an available time.'
+      );
+    }
+
+    if (
+      !isTimeAvailable(
+        selectedTime
+      )
+    ) {
+      return Alert.alert(
+        'Time unavailable',
+        'The full service no longer fits at this time. Please choose another time.'
+      );
+    }
+
+    if (
+      groupedBookingItems.length > 0
+    ) {
+      return createGroupedAppointments(
+        isWalkIn
+      );
+    }
+
+
+    let createdAppointment =
+      null;
+
+    try {
+      setPhoneDepositProcessing(
+        true
+      );
+
+      setPhoneDepositStep(
+        isWalkIn
+          ? 'Creating walk-in...'
+          : 'Creating appointment hold...'
+      );
+
+      const start =
+        `${selectedDate}T${selectedTime}:00`;
+
+      const end =
+        addMinutesLocal(
+          start,
+          selectedDuration
+        );
+
+      const notes =
+        `${specialtyLabel}` +
+        ` | $${Number(
+          price || 0
+        ).toFixed(2)}` +
+        ` | ${selectedDuration} min`;
+
+
+      const appointmentResponse =
+        await fetchOk(
+          `${API_BASE_URL}/appointments/`,
+          {
+            method:
+              'POST',
+
+            headers:
+              authHeaders,
+
+            body:
+              JSON.stringify(
+                {
+                  client_id:
+                    Number(
+                      clientId
+                    ),
+
+                  staff_id:
+                    Number(
+                      staffId
+                    ),
+
+                  booking_source:
+                    isWalkIn
+                      ? 'walk_in'
+                      : 'phone',
+
+                  service_id:
+                    Number(
+                      selectedService.id
+                    ),
+
+                  service_name:
+                    selectedService.name,
+
+                  start_time:
+                    start,
+
+                  end_time:
+                    end,
+
+                  notes,
+
+                  price:
+                    Number(
+                      price ||
+                      0
+                    ),
+
+                  tip:
+                    0,
+                }
+              ),
+          }
+        );
+
+
+      createdAppointment =
+        await appointmentResponse.json();
+
+
+      if (isWalkIn) {
+        await loadAppointments();
+
+        setSelectedTime(
+          null
+        );
+
+        setCreateOpen(
+          false
+        );
+
+        setDayViewOpen(
+          true
+        );
+
+        return;
+      }
+
+
+      const depositAmount =
+        Number(
+          createdAppointment
+            ?.deposit_amount ||
+          (
+            Number(
+              price ||
+              0
+            )
+            * 0.25
+          )
+        );
+
+
+      setPhoneDepositStep(
+        `Collecting $${depositAmount.toFixed(
+          2
+        )} deposit...`
+      );
+
+
+      await fetchOk(
+        `${API_BASE_URL}/payments/appointment/${createdAppointment.id}/moto-deposit/start`,
+        {
+          method:
+            'POST',
+
+          headers:
+            authHeaders,
+        }
+      );
+
+
+      setPhoneDepositStep(
+        'Waiting for Stripe reader...'
+      );
+
+
+      let completed =
+        false;
+
+      let lastStatus =
+        null;
+
+
+      for (
+        let attempt = 0;
+        attempt < 120;
+        attempt += 1
+      ) {
+        await new Promise(
+          (
+            resolve
+          ) =>
+            setTimeout(
+              resolve,
+              1000
+            )
+        );
+
+
+        const statusResponse =
+          await fetchOk(
+            `${API_BASE_URL}/payments/appointment/${createdAppointment.id}/moto-deposit/status`,
+            {
+              headers:
+                authHeaders,
+            }
+          );
+
+
+        lastStatus =
+          await statusResponse.json();
+
+
+        if (
+          lastStatus?.complete &&
+          lastStatus?.booking_status ===
+          'confirmed'
+        ) {
+          completed =
+            true;
+
+          break;
+        }
+
+
+        if (
+          lastStatus?.ok ===
+          false
+        ) {
+          throw new Error(
+            lastStatus?.error ||
+            'The deposit was not completed.'
+          );
+        }
+
+
+        setPhoneDepositStep(
+          'Confirming deposit...'
+        );
+      }
+
+
+      if (!completed) {
+        throw new Error(
+          'Stripe is still processing the deposit. Check the appointment again before retrying.'
+        );
+      }
+
+
+      await loadAppointments();
+
+
+      setSelectedTime(
+        null
+      );
+
+      setCreateOpen(
+        false
+      );
+
+      setDayViewOpen(
+        true
+      );
+
+    } catch (error) {
+      await loadAppointments();
+
+      Alert.alert(
+        isWalkIn
+          ? 'Walk-in could not be created'
+          : 'Deposit not completed',
+        String(
+          error?.message ||
+          error
+        )
+      );
+
+    } finally {
+      setPhoneDepositProcessing(
+        false
+      );
+
+      setPhoneDepositStep('');
+    }
+  };
+
+
+/* =====================================================
+   OPEN CREATE
+===================================================== */
+
+const closeCreateModal =
+  () => {
+    if (
+      phoneDepositProcessing
+    ) {
+      return;
+    }
+
+    setGroupedBookingItems(
+      []
+    );
+
+    setCreateOpen(
+      false
+    );
+  };
+
+
+const openCreate =
+  (
+    date =
+      selectedDate
+  ) => {
+    setGroupedBookingItems(
+      []
+    );
+
+    setSelectedDate(
+      date
+    );
+
+    setSelectedTime(
+      null
+    );
+
+    setBookingSource(
+      'phone'
+    );
+
+    setCreateOpen(
+      true
+    );
+  };
+
+
+/* =====================================================
+   APPOINTMENT DETAILS
+===================================================== */
+
+const loadAppointmentSales =
+  async (
+    appointmentId
+  ) => {
+    if (!appointmentId) {
+      setAppointmentSales([]);
+      return;
+    }
+
+    try {
+      setAppointmentSalesLoading(
+        true
+      );
+
+      const response =
+        await fetchOk(
+          `${API_BASE_URL}/appointments/${appointmentId}/sales`,
+          {
+            headers:
+              authHeaders,
+          }
+        );
+
+      const data =
+        await response.json();
+
+      setAppointmentSales(
+        Array.isArray(data)
+          ? data
+          : []
+      );
+    } catch (error) {
+      setAppointmentSales([]);
+
+      console.log(
+        'Could not load appointment products:',
+        error
+      );
+    } finally {
+      setAppointmentSalesLoading(
+        false
+      );
+    }
+  };
+
+
+  const openAppointmentDetails =
+  (
+    appointment
+  ) => {
+    if (
+      me?.role === 'staff' &&
+      appointment?.staff_id !== me?.id
+    ) {
+      return;
+    }
+
+    setSelectedDayAppointment(
+      appointment
+    );
+
+    setAppointmentSales([]);
+
+    loadAppointmentSales(
+      appointment.id
+    );
+  };
+
+
+const openEditor =
+  (
+    appointment
+  ) => {
+    if (
+      !appointment
+    ) {
+      return;
+    }
+
+    if (
+      appointment
+        ?.payment_status ===
+      'paid'
+    ) {
+      Alert.alert(
+        'Paid appointment',
+        'Paid appointments cannot be edited because the payment record has already been finalized.'
+      );
+
+      return;
+    }
+
+    setEditingAppointment(
+      appointment
+    );
+
+    const start =
+      new Date(
+        appointment.start_time
+      );
+
+    const duration =
+      durationMinutes(
+        appointment.start_time,
+        appointment.end_time
+      );
+
+    setEditDate(
+      String(
+        appointment.start_time
+      ).slice(
+        0,
+        10
+      )
+    );
+
+    setEditTime(
+      `${pad(
+        start.getHours()
+      )}:${pad(
+        start.getMinutes()
+      )}`
+    );
+
+    setEditHours(
+      String(
+        Math.floor(
+          duration /
+          60
+        )
+      )
+    );
+
+    setEditMinutes(
+      String(
+        duration %
+        60
+      )
+    );
+
+    setEditPrice(
+      String(
+        appointment.price ??
+        0
+      )
+    );
+
+    setEditTip(
+      String(
+        appointment.tip ??
+        0
+      )
+    );
+
+    setEditServiceName(
+      appointment.service_name ||
+      ''
+    );
+
+    setEditNotes(
+      appointment.notes ||
+      ''
+    );
+
+    setAddQty('1');
+
+if (
+  availableProducts.length
+) {
+  setAddProdId(
+    availableProducts[0].id
+  );
+} else {
+  setAddProdId(
+    null
+  );
+}
+
+if (
+  me?.role === 'staff'
+) {
+  setAddSellerId(
+    me.id
+  );
+} else {
+  setAddSellerId(
+    appointment.staff_id
+  );
+}
+
+    setSelectedDayAppointment(
+      null
+    );
+
+    setEditOpen(
+      true
+    );
+  };
+
+
+/* =====================================================
+   SAVE EDIT
+===================================================== */
+
+const saveEdit =
+  async () => {
+    if (
+      !editingAppointment
+    ) {
+      return;
+    }
+
+    const totalMinutes =
+      Math.max(
+        5,
+
+        (
+          parseInt(
+            editHours ||
+            '0',
+            10
+          ) *
+          60
+        ) +
+        parseInt(
+          editMinutes ||
+          '0',
+          10
+        )
+      );
+
+    const start =
+      `${editDate}T${editTime}:00`;
+
+    const end =
+      addMinutesLocal(
+        start,
+        totalMinutes
+      );
+
+    try {
+      await fetchOk(
+        `${API_BASE_URL}/appointments/${editingAppointment.id}`,
+        {
+          method:
+            'PUT',
+
+          headers:
+            authHeaders,
+
+          body:
+            JSON.stringify(
+              {
+                start_time:
+                  start,
+
+                end_time:
+                  end,
+
+                service_name:
+                  editServiceName,
+
+                price:
+                  Number(
+                    editPrice ||
+                    0
+                  ),
+
+                tip:
+                  Number(
+                    editTip ||
+                    0
+                  ),
+
+                notes:
+                  editNotes,
+              }
+            ),
+        }
+      );
+
+      await loadAppointments();
+
+      setEditOpen(
+        false
+      );
+
+      setEditingAppointment(
+        null
+      );
+
+      Alert.alert(
+        'Saved',
+        'Appointment updated.'
+      );
+    } catch (error) {
+      Alert.alert(
+        'Update failed',
+        String(
+          error.message ||
+          error
+        )
+      );
+    }
+  };
+
+
+/* =====================================================
+   DELETE APPOINTMENT
+===================================================== */
+
+const openDeleteConfirmation =
+  (
+    appointment
+  ) => {
+    if (
+      !appointment
+    ) {
+      return;
+    }
+
+
+    if (
+      !canPickStaff
+    ) {
+      Alert.alert(
+        'Permission required',
+        'Only the owner or receptionist can cancel appointments.'
+      );
+
+      return;
+    }
+
+
+    setAppointmentToDelete(
+      appointment
+    );
+
+    setSelectedDayAppointment(
+      null
+    );
+
+    setDeleteConfirmOpen(
+      true
+    );
+  };
+
+
+const cancelDeleteAppointment =
+  () => {
+    if (
+      cancellingAppointment
+    ) {
+      return;
+    }
+
+    setDeleteConfirmOpen(
+      false
+    );
+
+    setAppointmentToDelete(
+      null
+    );
+  };
+
+
+const cancelAppointment =
+  async (
+    appointment,
+    refundDeposit
+  ) => {
+    if (
+      !appointment ||
+      cancellingAppointment
+    ) {
+      return;
+    }
+
+
+    try {
+      setCancellingAppointment(
+        true
+      );
+
+
+      const response =
+        await fetchOk(
+          `${API_BASE_URL}/payments/appointment/${appointment.id}/cancel`,
+          {
+            method:
+              'POST',
+
+            headers:
+              authHeaders,
+
+            body:
+              JSON.stringify(
+                {
+                  refund_deposit:
+                    Boolean(
+                      refundDeposit
+                    ),
+                }
+              ),
+          }
+        );
+
+
+      await response.json();
+
+
+      setDeleteConfirmOpen(
+        false
+      );
+
+      setAppointmentToDelete(
+        null
+      );
+
+      setSelectedDayAppointment(
+        null
+      );
+
+      setEditOpen(
+        false
+      );
+
+      setAppointmentSales(
+        []
+      );
+
+
+      await loadAppointments();
+
+    } catch (
+      error
+    ) {
+      Alert.alert(
+        'Cancellation failed',
+        String(
+          error.message ||
+          error
+        )
+      );
+    } finally {
+      setCancellingAppointment(
+        false
+      );
+    }
+  };
+
+
+/* =====================================================
+   PRODUCT SALE
+===================================================== */
+
+const addProductToTicket =
+  async () => {
+    if (
+      !editingAppointment ||
+      !addProdId ||
+      addingProduct
+    ) {
+      return;
+    }
+
+    const quantity =
+      Math.max(
+        1,
+        parseInt(
+          addQty ||
+          '1',
+          10
+        )
+      );
+
+    try {
+      setAddingProduct(
+        true
+      );
+
+      setProductAdded(
+        false
+      );
+
+      setProductAddedMessage('');
+
+      const response =
+        await fetchOk(
+        `${API_BASE_URL}/appointments/${editingAppointment.id}/add_sale`,
+        {
+          method:
+            'POST',
+
+          headers:
+            authHeaders,
+
+            body:
+            JSON.stringify(
+              {
+                product_id:
+                  Number(
+                    addProdId
+                  ),
+          
+                quantity,
+          
+                staff_id:
+                  addSellerId
+                    ? Number(
+                        addSellerId
+                      )
+                    : null,
+              }
+            ),
+        }
+      );
+      const data =
+        await response.json();
+
+      await Promise.all(
+        [
+          loadAppointmentSales(
+            editingAppointment.id
+          ),
+
+          loadProducts(),
+        ]
+      );
+
+      setAddQty(
+        '1'
+      );
+
+      setAddProdId(
+        null
+      );
+
+      setProductAddedMessage(
+        data?.moved_to_seller_ticket
+          ? (
+              `Product added to ${
+                data.staff_name ||
+                'the selected professional'
+              }'s ticket.`
+            )
+          : 'Product added successfully.'
+      );
+
+      setProductAdded(
+        true
+      );
+
+      setTimeout(
+        () => {
+          setProductAdded(
+            false
+          );
+
+          setProductAddedMessage('');
+        },
+        4000
+      );
+    } catch (error) {
+      Alert.alert(
+        'Could not add product',
+        String(
+          error.message ||
+          error
+        )
+      );
+    } finally {
+      setAddingProduct(
+        false
+      );
+    }
+  };
+
+  /* =====================================================
+   UPDATE PRODUCT QUANTITY
+===================================================== */
+
+const updateProductSeller =
+  async (
+    sellerId
+  ) => {
+    if (
+      !selectedDayAppointment ||
+      !saleSellerTarget ||
+      !sellerId ||
+      updatingSaleSeller
+    ) {
+      return;
+    }
+
+    try {
+      setUpdatingSaleSeller(
+        true
+      );
+
+      const response =
+        await fetchOk(
+          `${API_BASE_URL}/appointments/${selectedDayAppointment.id}/sales/${saleSellerTarget.sale_id}/seller`,
+          {
+            method:
+              'PUT',
+
+            headers:
+              authHeaders,
+
+            body:
+              JSON.stringify({
+                staff_id:
+                  Number(
+                    sellerId
+                  ),
+              }),
+          }
+        );
+
+      const data =
+        await response.json();
+
+      setSaleSellerPickerOpen(
+        false
+      );
+
+      setSaleSellerTarget(
+        null
+      );
+
+      await Promise.all(
+        [
+          loadAppointmentSales(
+            selectedDayAppointment.id
+          ),
+
+          loadProducts(),
+        ]
+      );
+
+      Alert.alert(
+        'Seller updated',
+        data?.moved_to_seller_ticket
+          ? (
+              `The product was moved to ${
+                data.staff_name ||
+                'the selected professional'
+              }'s grouped ticket.`
+            )
+          : (
+              `Sold By was updated to ${
+                data.staff_name ||
+                'the selected professional'
+              }.`
+            )
+      );
+
+    } catch (error) {
+      Alert.alert(
+        'Could not change seller',
+        String(
+          error.message ||
+          error
+        )
+      );
+
+    } finally {
+      setUpdatingSaleSeller(
+        false
+      );
+    }
+  };
+
+
+const updateProductQuantity =
+async (
+  appointmentId,
+  saleId,
+  newQuantity
+) => {
+  const quantity =
+    Number(newQuantity);
+
+  if (
+    !appointmentId ||
+    !saleId ||
+    quantity < 1
+  ) {
+    return;
+  }
+
+  try {
+    await fetchOk(
+      `${API_BASE_URL}/appointments/${appointmentId}/sales/${saleId}`,
+      {
+        method:
+          'PUT',
+
+        headers:
+          authHeaders,
+
+        body:
+          JSON.stringify({
+            quantity,
+          }),
+      }
+    );
+
+    await loadAppointmentSales(
+      appointmentId
+    );
+
+    if (
+      checkoutAppointment?.id ===
+      appointmentId
+    ) {
+      await loadPaymentSummary(
+        appointmentId
+      );
+    }
+  } catch (error) {
+    Alert.alert(
+      'Could not update quantity',
+      String(
+        error.message ||
+        error
+      )
+    );
+  }
+};
+
+
+/* =====================================================
+   REMOVE PRODUCT FROM APPOINTMENT
+===================================================== */
+
+const removeProductFromAppointment =
+  async (
+    appointmentId,
+    saleId
+  ) => {
+    if (
+      !appointmentId ||
+      !saleId
+    ) {
+      return;
+    }
+
+    try {
+      await fetchOk(
+        `${API_BASE_URL}/appointments/${appointmentId}/sales/${saleId}`,
+        {
+          method:
+            'DELETE',
+
+          headers: {
+            Authorization:
+              `Bearer ${token}`,
+          },
+        }
+      );
+
+
+      await loadAppointmentSales(
+        appointmentId
+      );
+
+
+      if (
+        checkoutAppointment?.id ===
+        appointmentId
+      ) {
+        await loadPaymentSummary(
+          appointmentId
+        );
+      }
+
+
+      Alert.alert(
+        'Product removed',
+        'The product was removed from the appointment.'
+      );
+    } catch (error) {
+      Alert.alert(
+        'Could not remove product',
+        String(
+          error.message ||
+          error
+        )
+      );
+    }
+  };
+
+
+/* =====================================================
+   RECEPTIONIST CHECKOUT
+===================================================== */
+
+const loadPaymentSummary =
+  async (
+    appointmentId
+  ) => {
+    if (
+      !appointmentId
+    ) {
+      return;
+    }
+
+    try {
+      setPaymentLoading(
+        true
+      );
+
+      const groupResponse =
+        await fetchOk(
+          `${API_BASE_URL}/payments/appointment/${appointmentId}/group-checkout-summary`,
+          {
+            headers:
+              authHeaders,
+          }
+        );
+
+      const groupData =
+        await groupResponse.json();
+
+      if (
+        groupData?.is_grouped
+      ) {
+        const initialTips = {};
+
+        (
+          groupData.items ||
+          []
+        ).forEach(
+          (
+            item
+          ) => {
+            initialTips[
+              String(
+                item.appointment_id
+              )
+            ] = {
+              choice:
+                'none',
+
+              custom:
+                '',
+            };
+          }
+        );
+
+        setGroupPaymentSummary(
+          groupData
+        );
+
+        setGroupTipChoices(
+          initialTips
+        );
+
+        setPaymentSummary(
+          null
+        );
+
+        return;
+      }
+
+      setGroupPaymentSummary(
+        null
+      );
+
+      setGroupTipChoices({});
+
+      const response =
+        await fetchOk(
+          `${API_BASE_URL}/payments/appointment/${appointmentId}/summary`,
+          {
+            headers:
+              authHeaders,
+          }
+        );
+
+      const data =
+        await response.json();
+
+      setPaymentSummary(
+        data
+      );
+    } catch (error) {
+      setPaymentSummary(
+        null
+      );
+
+      setGroupPaymentSummary(
+        null
+      );
+
+      setGroupTipChoices({});
+
+      Alert.alert(
+        'Checkout error',
+        String(
+          error.message ||
+          error
+        )
+      );
+    } finally {
+      setPaymentLoading(
+        false
+      );
+    }
+  };
+
+
+const openCheckout =
+  async (
+    appointment
+  ) => {
+    if (
+      !appointment
+    ) {
+      return;
+    }
+
+    setCheckoutAppointment(
+      appointment
+    );
+
+    setCheckoutTipChoice(
+      'none'
+    );
+
+    setCustomTip('');
+
+    setGroupPaymentSummary(
+      null
+    );
+
+    setGroupTipChoices({});
+
+    setPaymentMethod(
+      'card'
+    );
+
+    setPaymentSummary(
+      null
+    );
+
+    setSelectedDayAppointment(
+      null
+    );
+
+    setCheckoutOpen(
+      true
+    );
+
+    await loadPaymentSummary(
+      appointment.id
+    );
+  };
+
+
+const closeCheckout =
+  () => {
+    if (
+      paymentSubmitting
+    ) {
+      return;
+    }
+
+    setCheckoutOpen(
+      false
+    );
+
+    setCheckoutAppointment(
+      null
+    );
+
+    setPaymentSummary(
+      null
+    );
+
+    setGroupPaymentSummary(
+      null
+    );
+
+    setGroupTipChoices({});
+
+    setCheckoutTipChoice(
+      'none'
+    );
+
+    setCustomTip('');
+
+    setPaymentMethod(
+      'card'
+    );
+  };
+
+
+const clearCompletedCheckout =
+  () => {
+    setTimeout(
+      () => {
+        setCheckoutAppointment(
+          null
+        );
+
+        setPaymentSummary(
+          null
+        );
+
+        setGroupPaymentSummary(
+          null
+        );
+
+        setGroupTipChoices({});
+      },
+      400
+    );
+  };
+
+
+const completeCashPayment =
+  async () => {
+    if (
+      !checkoutAppointment
+    ) {
+      return;
+    }
+
+    try {
+      setPaymentSubmitting(
+        true
+      );
+
+      if (
+        groupPaymentSummary?.is_grouped
+      ) {
+        await fetchOk(
+          `${API_BASE_URL}/payments/booking-group/${groupPaymentSummary.booking_group_id}/cash`,
+          {
+            method:
+              'POST',
+
+            headers:
+              authHeaders,
+
+            body:
+              JSON.stringify({
+                tips_cents:
+                  buildGroupTipsPayload(),
+              }),
+          }
+        );
+      } else {
+        const tipCents =
+          Math.max(
+            0,
+            Math.round(
+              checkoutTipAmount *
+              100
+            )
+          );
+
+        await fetchOk(
+          `${API_BASE_URL}/payments/cash?appointment_id=${checkoutAppointment.id}&tip_cents=${tipCents}`,
+          {
+            method:
+              'POST',
+
+            headers:
+              authHeaders,
+          }
+        );
+      }
+
+      setCheckoutOpen(
+        false
+      );
+
+      await loadAppointments();
+
+      clearCompletedCheckout();
+
+    } catch (error) {
+      Alert.alert(
+        'Payment failed',
+        String(
+          error.message ||
+          error
+        )
+      );
+    } finally {
+      setPaymentSubmitting(
+        false
+      );
+    }
+  };
+
+
+const completeCardPayment =
+  async () => {
+    if (
+      !checkoutAppointment
+    ) {
+      return;
+    }
+
+    try {
+      setPaymentSubmitting(
+        true
+      );
+
+      let response;
+
+      if (
+        groupPaymentSummary?.is_grouped
+      ) {
+        response =
+          await fetchOk(
+            `${API_BASE_URL}/payments/booking-group/${groupPaymentSummary.booking_group_id}/checkout-session`,
+            {
+              method:
+                'POST',
+
+              headers:
+                authHeaders,
+
+              body:
+                JSON.stringify({
+                  tips_cents:
+                    buildGroupTipsPayload(),
+                }),
+            }
+          );
+      } else {
+        const tipCents =
+          Math.max(
+            0,
+            Math.round(
+              checkoutTipAmount *
+              100
+            )
+          );
+
+        response =
+          await fetchOk(
+            `${API_BASE_URL}/payments/checkout-session?appointment_id=${checkoutAppointment.id}&tip_cents=${tipCents}`,
+            {
+              method:
+                'POST',
+
+              headers:
+                authHeaders,
+            }
+          );
+      }
+
+      const data =
+        await response.json();
+
+      if (
+        !data?.url
+      ) {
+        throw new Error(
+          'Stripe did not return a checkout URL.'
+        );
+      }
+
+      if (
+        Platform.OS === 'web' &&
+        typeof window !== 'undefined'
+      ) {
+        window.location.href =
+          data.url;
+      } else {
+        await Linking.openURL(
+          data.url
+        );
+      }
+    } catch (error) {
+      Alert.alert(
+        'Card checkout failed',
+        String(
+          error.message ||
+          error
+        )
+      );
+    } finally {
+      setPaymentSubmitting(
+        false
+      );
+    }
+  };
+
+
+
+/* =====================================================
+   REFUND FLOW
+===================================================== */
+
+const openRefund =
+  async (
+    appointment
+  ) => {
+    if (
+      !appointment ||
+      !canPickStaff
+    ) {
+      return;
+    }
+
+    try {
+      setRefundLoading(
+        true
+      );
+
+      setRefundAppointment(
+        appointment
+      );
+
+      setRefundSummary(
+        null
+      );
+
+      setRefundService(
+        false
+      );
+
+      setRefundTip(
+        false
+      );
+
+      setRefundSaleIds(
+        []
+      );
+
+      setRefundReason(
+        ''
+      );
+
+      setSelectedDayAppointment(
+        null
+      );
+
+      setRefundOpen(
+        true
+      );
+
+
+      const response =
+        await fetchOk(
+          `${API_BASE_URL}/payments/appointment/${appointment.id}/summary`,
+          {
+            headers:
+              authHeaders,
+          }
+        );
+
+      const data =
+        await response.json();
+
+      setRefundSummary(
+        data
+      );
+    } catch (error) {
+      setRefundOpen(
+        false
+      );
+
+      setRefundAppointment(
+        null
+      );
+
+      setRefundSummary(
+        null
+      );
+
+      Alert.alert(
+        'Refund error',
+        String(
+          error.message ||
+          error
+        )
+      );
+    } finally {
+      setRefundLoading(
+        false
+      );
+    }
+  };
+
+
+const closeRefund =
+  () => {
+    if (
+      refundSubmitting
+    ) {
+      return;
+    }
+
+    setRefundOpen(
+      false
+    );
+
+    setRefundAppointment(
+      null
+    );
+
+    setRefundSummary(
+      null
+    );
+
+    setRefundService(
+      false
+    );
+
+    setRefundTip(
+      false
+    );
+
+    setRefundSaleIds(
+      []
+    );
+
+    setRefundReason(
+      ''
+    );
+  };
+
+
+const toggleRefundSale =
+  (
+    saleId
+  ) => {
+    setRefundSaleIds(
+      (
+        current
+      ) =>
+        current.includes(
+          saleId
+        )
+          ? current.filter(
+              (
+                id
+              ) =>
+                id !==
+                saleId
+            )
+          : [
+              ...current,
+              saleId,
+            ]
+    );
+  };
+
+
+const selectFullRefund =
+  () => {
+    if (
+      !refundSummary
+    ) {
+      return;
+    }
+
+    setRefundService(
+      !refundSummary
+        ?.refunded_service
+    );
+
+    setRefundTip(
+      !refundSummary
+        ?.refunded_tip &&
+      Number(
+        refundSummary?.tip ||
+        0
+      ) > 0
+    );
+
+    setRefundSaleIds(
+      refundableProducts.map(
+        (
+          item
+        ) =>
+          item.sale_id
+      )
+    );
+  };
+
+
+const clearRefundSelection =
+  () => {
+    setRefundService(
+      false
+    );
+
+    setRefundTip(
+      false
+    );
+
+    setRefundSaleIds(
+      []
+    );
+  };
+
+
+const submitRefund =
+  async () => {
+    if (
+      !refundAppointment ||
+      !refundSummary ||
+      refundSubmitting
+    ) {
+      return;
+    }
+
+
+    const hasSelection =
+      refundService ||
+      refundTip ||
+      refundSaleIds.length > 0;
+
+
+    if (
+      !hasSelection
+    ) {
+      Alert.alert(
+        'Nothing selected',
+        'Choose the service, tip, or at least one product to refund.'
+      );
+
+      return;
+    }
+
+
+    const payments =
+      refundSummary?.payments ||
+      [];
+
+
+    const paidPayments =
+      payments.filter(
+        (
+          payment
+        ) =>
+          payment.status ===
+          'paid'
+      );
+
+
+    const selectedPayment =
+      paidPayments.length > 0
+        ? paidPayments[
+            paidPayments.length - 1
+          ]
+        : null;
+
+
+    if (
+      !selectedPayment?.id
+    ) {
+      Alert.alert(
+        'Refund unavailable',
+        'A paid transaction could not be found for this appointment.'
+      );
+
+      return;
+    }
+
+
+    try {
+      setRefundSubmitting(
+        true
+      );
+
+
+      const response =
+        await fetchOk(
+          `${API_BASE_URL}/payments/appointment/${refundAppointment.id}/refund`,
+          {
+            method:
+              'POST',
+
+            headers:
+              authHeaders,
+
+            body:
+              JSON.stringify({
+                payment_id:
+                  selectedPayment.id,
+
+                refund_service:
+                  refundService,
+
+                refund_tip:
+                  refundTip,
+
+                sale_ids:
+                  refundSaleIds,
+
+                reason:
+                  refundReason.trim() ||
+                  null,
+              }),
+          }
+        );
+
+
+      const data =
+        await response.json();
+
+
+      await loadAppointments();
+
+
+      const summaryResponse =
+        await fetchOk(
+          `${API_BASE_URL}/payments/appointment/${refundAppointment.id}/summary`,
+          {
+            headers:
+              authHeaders,
+          }
+        );
+
+      const updatedSummary =
+        await summaryResponse.json();
+
+
+      setRefundSummary(
+        updatedSummary
+      );
+
+      setRefundService(
+        false
+      );
+
+      setRefundTip(
+        false
+      );
+
+      setRefundSaleIds(
+        []
+      );
+
+      setRefundReason(
+        ''
+      );
+
+
+      Alert.alert(
+        'Refund completed',
+        `$${Number(
+          data.amount ||
+          selectedRefundTotal ||
+          0
+        ).toFixed(
+          2
+        )} was refunded successfully.`
+      );
+    } catch (error) {
+      Alert.alert(
+        'Refund failed',
+        String(
+          error.message ||
+          error
+        )
+      );
+    } finally {
+      setRefundSubmitting(
+        false
+      );
+    }
+  };
+
+
+const completePayment =
+  () => {
+    if (
+      paymentSummary?.payment_status ===
+      'paid'
+    ) {
+      return Alert.alert(
+        'Already paid',
+        'This appointment has already been paid.'
+      );
+    }
+
+    if (
+      paymentMethod ===
+      'cash'
+    ) {
+      completeCashPayment();
+
+      return;
+    }
+
+    completeCardPayment();
+  };
+
+
+/* =====================================================
+   PICKER ITEMS
+===================================================== */
+
+const clientItems =
+  clients.map(
+    (
+      client
+    ) => ({
+      value:
+        client.id,
+
+      label:
+        `${client.first_name || ''} ${client.last_name || ''}`.trim(),
+
+      subtitle:
+        client.phone ||
+        client.email ||
+        '',
+    })
+  );
+
+
+const specialtyItems =
+  specialties.map(
+    (
+      item
+    ) => ({
+      value:
+        item.slug,
+
+      label:
+        item.label,
+    })
+  );
+
+
+const staffItems =
+  compatibleStaff.map(
+    (
+      person
+    ) => ({
+      value:
+        person.id,
+
+      label:
+        person.name,
+
+      subtitle:
+        person.profession ||
+        '',
+    })
+  );
+
+  const sellerItems =
+  staff.map(
+    (
+      person
+    ) => ({
+      value:
+        person.id,
+
+      label:
+        person.name,
+
+      subtitle:
+        person.profession ||
+        'Staff',
+    })
+  );
+
+
+const serviceItems =
+  services.map(
+    (
+      service
+    ) => ({
+      value:
+        service.id,
+
+      label:
+        service.name,
+
+      subtitle:
+        `${service.duration_minutes} min • $${Number(
+          service.price ||
+          0
+        ).toFixed(2)}`,
+    })
+  );
+
+
+const availableProducts =
+  products.filter(
+    (
+      product
+    ) => {
+      if (
+        product.active ===
+        false
+      ) {
+        return false;
+      }
+
+      if (
+        product.track_inventory ===
+        false
+      ) {
+        return true;
+      }
+
+      return (
+        Number(
+          product.stock_quantity ||
+          0
+        ) >
+        0
+      );
+    }
+  );
+
+
+const productItems =
+  availableProducts.map(
+    (
+      product
+    ) => ({
+      value:
+        product.id,
+
+      label:
+        product.name,
+
+      subtitle:
+        product.track_inventory ===
+        false
+          ? `$${Number(
+              product.price ||
+              0
+            ).toFixed(2)} • No stock limit`
+          : `$${Number(
+              product.price ||
+              0
+            ).toFixed(2)} • ${Number(
+              product.stock_quantity ||
+              0
+            )} in stock`,
+    })
+  );
+
+
+/* =====================================================
+   LOADING
+===================================================== */
+
+if (
+  loading
+) {
   return (
-    <KeyboardAvoidingView style={{ flex: 1, backgroundColor: '#111827' }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
-        <SafeAreaView style={{ flex: 1 }}>
-          <StatusBar style="light" backgroundColor="#111827" />
+    <View
+      style={{
+        flex:
+          1,
 
-          {/* Header: Calendar only; clicking a date opens sidebar */}
-          <View style={{ padding: 16, paddingBottom: 8 }}>
-            <Text style={{ fontSize: 22, fontWeight: '600', marginBottom: 8, color: '#fff' }}>Calendar</Text>
-            <Calendar
-              onDayPress={(d) => openPanel(d.dateString)}
-              markedDates={{ [selectedDate]: { selected: true, selectedColor: '#3b82f6' } }}
-              enableSwipeMonths
-              style={{ marginTop: 6, marginBottom: 12, backgroundColor: '#14141a', borderRadius: 8 }}
-              theme={{
-                backgroundColor: '#14141a',
-                calendarBackground: '#14141a',
-                dayTextColor: '#f2f3f5',
-                monthTextColor: '#f2f3f5',
-                textDisabledColor: '#555b66',
-                arrowColor: '#f2f3f5',
-                todayTextColor: '#3b82f6',
-                selectedDayBackgroundColor: '#3b82f6',
-                selectedDayTextColor: '#ffffff',
+        backgroundColor:
+          COLORS.background,
+
+        alignItems:
+          'center',
+
+        justifyContent:
+          'center',
+      }}
+    >
+      <ActivityIndicator
+        size="large"
+
+        color={
+          COLORS.royal
+        }
+      />
+
+      <Text
+        style={{
+          color:
+            COLORS.textMuted,
+
+          marginTop:
+            12,
+        }}
+      >
+        Loading schedule...
+      </Text>
+    </View>
+  );
+}
+
+
+/* =====================================================
+   MAIN
+===================================================== */
+
+return (
+  <View
+    style={{
+      flex:
+        1,
+
+      backgroundColor:
+        COLORS.background,
+    }}
+  >
+    <ScrollView
+      showsVerticalScrollIndicator={
+        false
+      }
+
+      keyboardShouldPersistTaps="handled"
+
+      contentContainerStyle={{
+        padding:
+          isPhone
+            ? 15
+            : 24,
+
+        paddingBottom:
+          50,
+      }}
+    >
+      <View
+        style={{
+          width:
+            '100%',
+
+          maxWidth:
+            1450,
+
+          alignSelf:
+            'center',
+        }}
+      >
+
+        {/* =================================================
+            HEADER
+        ================================================= */}
+
+        <View
+          style={{
+            flexDirection:
+              isPhone
+                ? 'column'
+                : 'row',
+
+            alignItems:
+              isPhone
+                ? 'stretch'
+                : 'center',
+
+            justifyContent:
+              'space-between',
+
+            gap:
+              14,
+
+            marginBottom:
+              20,
+          }}
+        >
+          <View
+            style={{
+              flex:
+                1,
+            }}
+          >
+            <Text
+              style={{
+                color:
+                  COLORS.royalDark,
+
+                fontSize:
+                  isPhone
+                    ? 23
+                    : 30,
+
+                fontWeight:
+                  '900',
               }}
-            />
+            >
+              Schedule
+            </Text>
 
-            <View style={{ marginTop: 8, marginBottom: 8, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
-              <Button
-                title="Refresh"
-                onPress={async () => {
-                  try {
-                    await Promise.all([
-                      loadClients(),
-                      loadAppointments(),
-                      loadAvailability(selectedDate, staffId),
-                      loadProducts(),
-                      loadSpecialties(),
-                    ]);
-                  } catch (e) {
-                    Alert.alert('Refresh failed', String(e.message || e));
-                  }
-                }}
-                color={Platform.OS === 'ios' ? undefined : '#3b82f6'}
-              />
-            </View>
+            <Text
+              style={{
+                color:
+                  COLORS.textMuted,
 
-            <Text style={{ fontSize: 18, fontWeight: '600', marginTop: 8, color: '#fff' }}>Appointments</Text>
+                fontSize:
+                  13,
+
+                marginTop:
+                  4,
+              }}
+            >
+              View availability and manage appointments.
+            </Text>
           </View>
 
-          {/* Appointments list */}
-          <FlatList
-            data={appointments}
-            keyExtractor={(item) => String(item.id)}
-            renderItem={({ item }) => {
-              const { date, times } = fmtRange(item.start_time, item.end_time);
-              const staffName = getStaffName(item.staff_id);
-              const clientName = getClientName(item.client_id);
 
-              return (
-                <View style={{ backgroundColor: '#14141a', marginHorizontal: 16, marginVertical: 8, padding: 12, borderRadius: 10, borderWidth: 1, borderColor: '#2a2a33' }}>
-                  <Text style={{ fontWeight: '600', color: '#fff' }}>{item.service_name}</Text>
-                  <Text style={{ color: '#ccc' }}>{date} • {times}</Text>
-                  <Text style={{ color: '#ccc' }}>Client: {clientName} • Staff: {staffName}</Text>
-                  {!!item.notes && <Text style={{ color: '#a9adb6', marginTop: 4 }}>{item.notes}</Text>}
-                  <Text style={{ color: '#a9adb6', marginTop: 4 }}>
-                    Price: ${Number(item.price || 0).toFixed(2)} • Tip: ${Number(item.tip || 0).toFixed(2)}
+          <View
+            style={{
+              flexDirection:
+                'row',
+
+              gap:
+                8,
+            }}
+          >
+            <Button
+              title="Refresh"
+
+              secondary
+
+              onPress={
+                refresh
+              }
+            />
+
+            <Button
+              title="+ New Appointment"
+
+              onPress={() =>
+                openCreate(
+                  selectedDate
+                )
+              }
+            />
+          </View>
+        </View>
+
+
+        {/* =================================================
+            MONTH CALENDAR
+        ================================================= */}
+
+        <View
+          style={{
+            backgroundColor:
+              COLORS.white,
+
+            borderWidth:
+              1,
+
+            borderColor:
+              COLORS.border,
+
+            borderRadius:
+              RADIUS.large,
+
+            overflow:
+              'hidden',
+
+            marginBottom:
+              dayViewOpen
+                ? 18
+                : 0,
+
+            ...SHADOWS.card,
+          }}
+        >
+          <View
+            style={{
+              flexDirection:
+                'row',
+
+              alignItems:
+                'center',
+
+              justifyContent:
+                'space-between',
+
+              padding:
+                18,
+
+              borderBottomWidth:
+                1,
+
+              borderBottomColor:
+                COLORS.border,
+            }}
+          >
+            <View>
+              <Text
+                style={{
+                  color:
+                    COLORS.royalDark,
+
+                  fontSize:
+                    18,
+
+                  fontWeight:
+                    '900',
+                }}
+              >
+                Calendar
+              </Text>
+
+              <Text
+                style={{
+                  color:
+                    COLORS.textMuted,
+
+                  fontSize:
+                    12,
+
+                  marginTop:
+                    3,
+                }}
+              >
+                Choose a day to expand staff availability below.
+              </Text>
+            </View>
+
+
+            <TouchableOpacity
+              onPress={() => {
+                setSelectedDate(
+                  today
+                );
+
+                setSelectedTime(
+                  null
+                );
+
+                setDayViewOpen(
+                  true
+                );
+              }}
+
+              style={{
+                minHeight:
+                  36,
+
+                paddingHorizontal:
+                  14,
+
+                borderRadius:
+                  RADIUS.round,
+
+                backgroundColor:
+                  COLORS.blueSoft,
+
+                alignItems:
+                  'center',
+
+                justifyContent:
+                  'center',
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    COLORS.royal,
+
+                  fontWeight:
+                    '900',
+
+                  fontSize:
+                    12,
+                }}
+              >
+                Today
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+
+          <Calendar
+            current={
+              selectedDate
+            }
+
+            onDayPress={
+              (
+                day
+              ) => {
+                setSelectedDate(
+                  day.dateString
+                );
+
+                setSelectedTime(
+                  null
+                );
+
+                setDayViewOpen(
+                  true
+                );
+              }
+            }
+
+            markedDates={
+              markedDates
+            }
+
+            enableSwipeMonths
+
+            theme={{
+              backgroundColor:
+                COLORS.white,
+
+              calendarBackground:
+                COLORS.white,
+
+              textSectionTitleColor:
+                COLORS.textMuted,
+
+              selectedDayBackgroundColor:
+                COLORS.royal,
+
+              selectedDayTextColor:
+                COLORS.white,
+
+              todayTextColor:
+                COLORS.royal,
+
+              dayTextColor:
+                COLORS.text,
+
+              textDisabledColor:
+                COLORS.borderStrong,
+
+              dotColor:
+                COLORS.royal,
+
+              selectedDotColor:
+                COLORS.white,
+
+              arrowColor:
+                COLORS.royal,
+
+              monthTextColor:
+                COLORS.royalDark,
+
+              textMonthFontWeight:
+                '900',
+
+              textDayFontWeight:
+                '600',
+
+              textDayHeaderFontWeight:
+                '800',
+            }}
+          />
+        </View>
+                  {/* =================================================
+              EXPANDED DAY VIEW
+          ================================================= */}
+
+{dayViewOpen && (
+            <View>
+
+              {/* DAY TITLE */}
+
+              <View
+                style={{
+                  backgroundColor:
+                    COLORS.white,
+
+                  borderWidth:
+                    1,
+
+                  borderColor:
+                    COLORS.border,
+
+                  borderRadius:
+                    RADIUS.large,
+
+                  padding:
+                    isPhone
+                      ? 16
+                      : 20,
+
+                  marginBottom:
+                    14,
+
+                  ...SHADOWS.card,
+                }}
+              >
+                <View
+                  style={{
+                    flexDirection:
+                      'row',
+
+                    alignItems:
+                      'center',
+
+                    justifyContent:
+                      'space-between',
+
+                    gap:
+                      12,
+                  }}
+                >
+                  <View
+                    style={{
+                      flex:
+                        1,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.royalDark,
+
+                        fontSize:
+                          isPhone
+                            ? 20
+                            : 25,
+
+                        fontWeight:
+                          '900',
+                      }}
+                    >
+                      {
+                        formatDateLong(
+                          selectedDate
+                        )
+                      }
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          12,
+
+                        marginTop:
+                          4,
+                      }}
+                    >
+                      {
+                        canPickStaff
+                          ? 'All staff schedules and availability'
+                          : 'Your schedule and availability'
+                      }
+                    </Text>
+                  </View>
+
+
+                  <View
+                    style={{
+                      backgroundColor:
+                        COLORS.blueSoft,
+
+                      borderRadius:
+                        RADIUS.round,
+
+                      paddingHorizontal:
+                        12,
+
+                      paddingVertical:
+                        8,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.royal,
+
+                        fontSize:
+                          11,
+
+                        fontWeight:
+                          '900',
+                      }}
+                    >
+                      {
+                        appointmentsForDate.length
+                      }
+                      {' '}
+                      {
+                        appointmentsForDate.length ===
+                        1
+                          ? 'appointment'
+                          : 'appointments'
+                      }
+                    </Text>
+                  </View>
+                </View>
+
+
+                <View
+                  style={{
+                    flexDirection:
+                      isPhone
+                        ? 'column'
+                        : 'row',
+
+                    gap:
+                      8,
+
+                    marginTop:
+                      16,
+                  }}
+                >
+                  <Button
+                    title="← Previous Day"
+
+                    secondary
+
+                    style={{
+                      flex:
+                        1,
+                    }}
+
+                    onPress={
+                      previousDay
+                    }
+                  />
+
+                  <Button
+                    title="+ Add Appointment"
+
+                    style={{
+                      flex:
+                        1,
+                    }}
+
+                    onPress={() =>
+                      openCreate(
+                        selectedDate
+                      )
+                    }
+                  />
+
+                  <Button
+                    title="Next Day →"
+
+                    secondary
+
+                    style={{
+                      flex:
+                        1,
+                    }}
+
+                    onPress={
+                      nextDay
+                    }
+                  />
+                </View>
+              </View>
+
+
+              {/* =================================================
+                  STAFF SCHEDULE
+              ================================================= */}
+
+              <View
+                style={{
+                  backgroundColor:
+                    COLORS.white,
+
+                  borderWidth:
+                    1,
+
+                  borderColor:
+                    COLORS.border,
+
+                  borderRadius:
+                    RADIUS.large,
+
+                  overflow:
+                    'hidden',
+
+                  ...SHADOWS.card,
+                }}
+              >
+                {scheduleStaff.length ===
+                0 ? (
+                  <View
+                    style={{
+                      padding:
+                        30,
+
+                      alignItems:
+                        'center',
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          14,
+                      }}
+                    >
+                      No staff members are available to display.
+                    </Text>
+                  </View>
+                ) : (
+                  <ScrollView
+                    horizontal
+
+                    showsHorizontalScrollIndicator={
+                      true
+                    }
+
+                    contentContainerStyle={{
+                      minWidth:
+                        isDesktop
+                          ? '100%'
+                          : undefined,
+                    }}
+                  >
+                    <View>
+
+                      {/* COLUMN HEADERS */}
+
+                      <View
+                        style={{
+                          flexDirection:
+                            'row',
+
+                          backgroundColor:
+                            COLORS.royal,
+                        }}
+                      >
+                        <View
+                          style={{
+                            width:
+                              86,
+
+                            minHeight:
+                              62,
+
+                            paddingHorizontal:
+                              10,
+
+                            alignItems:
+                              'center',
+
+                            justifyContent:
+                              'center',
+
+                            borderRightWidth:
+                              1,
+
+                            borderRightColor:
+                              'rgba(255,255,255,0.18)',
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.white,
+
+                              fontSize:
+                                11,
+
+                              fontWeight:
+                                '900',
+
+                              letterSpacing:
+                                0.6,
+                            }}
+                          >
+                            TIME
+                          </Text>
+                        </View>
+
+
+                        {scheduleStaff.map(
+                          (
+                            person
+                          ) => (
+                            <View
+                              key={
+                                `header-${person.id}`
+                              }
+
+                              style={{
+                                width:
+                                  isPhone
+                                    ? 185
+                                    : 220,
+
+                                minHeight:
+                                  62,
+
+                                paddingHorizontal:
+                                  12,
+
+                                alignItems:
+                                  'center',
+
+                                justifyContent:
+                                  'center',
+
+                                borderRightWidth:
+                                  1,
+
+                                borderRightColor:
+                                  'rgba(255,255,255,0.18)',
+                              }}
+                            >
+                              <Text
+                                numberOfLines={
+                                  1
+                                }
+
+                                style={{
+                                  color:
+                                    COLORS.white,
+
+                                  fontSize:
+                                    13,
+
+                                  fontWeight:
+                                    '900',
+                                }}
+                              >
+                                {
+                                  person.name
+                                }
+                              </Text>
+
+                              {!!person.profession && (
+                                <Text
+                                  numberOfLines={
+                                    1
+                                  }
+
+                                  style={{
+                                    color:
+                                      'rgba(255,255,255,0.72)',
+
+                                    fontSize:
+                                      10,
+
+                                    marginTop:
+                                      3,
+                                  }}
+                                >
+                                  {
+                                    person.profession
+                                  }
+                                </Text>
+                              )}
+                            </View>
+                          )
+                        )}
+                      </View>
+
+
+                      {/* SCHEDULE ROWS */}
+
+                      {slots.map(
+                        (
+                          time,
+                          slotIndex
+                        ) => (
+                          <View
+                            key={
+                              `schedule-${time}`
+                            }
+
+                            style={{
+                              flexDirection:
+                                'row',
+                            }}
+                          >
+
+                            {/* TIME COLUMN */}
+
+                            <View
+                              style={{
+                                width:
+                                  86,
+
+                                height:
+                                  54,
+
+                                paddingHorizontal:
+                                  8,
+
+                                alignItems:
+                                  'center',
+
+                                justifyContent:
+                                  'center',
+
+                                backgroundColor:
+                                  slotIndex % 2 ===
+                                  0
+                                    ? COLORS.white
+                                    : COLORS.blueVerySoft,
+
+                                borderRightWidth:
+                                  1,
+
+                                borderRightColor:
+                                  COLORS.border,
+
+                                borderBottomWidth:
+                                  1,
+
+                                borderBottomColor:
+                                  COLORS.border,
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  color:
+                                    COLORS.textSecondary,
+
+                                  fontSize:
+                                    11,
+
+                                  fontWeight:
+                                    '800',
+                                }}
+                              >
+                                {
+                                  formatTime12(
+                                    time
+                                  )
+                                }
+                              </Text>
+                            </View>
+
+
+                            {/* STAFF COLUMNS */}
+
+                            {scheduleStaff.map(
+                              (
+                                employee
+                              ) => {
+                                const starting =
+                                  appointmentStartingAt(
+                                    employee.id,
+                                    time
+                                  );
+
+                                const covering =
+                                  appointmentCoveringSlot(
+                                    employee.id,
+                                    time
+                                  );
+
+                                const continuing =
+                                  covering &&
+                                  !starting;
+
+                                const blockAppointment =
+                                  starting ||
+                                  covering;
+
+                                const isPaid =
+                                  blockAppointment
+                                    ?.payment_status ===
+                                  'paid';
+
+
+                                return (
+                                  <View
+                                    key={
+                                      `${employee.id}-${time}`
+                                    }
+
+                                    style={{
+                                      width:
+                                        isPhone
+                                          ? 185
+                                          : 220,
+
+                                      height:
+                                        54,
+
+                                      borderRightWidth:
+                                        1,
+
+                                      borderRightColor:
+                                        COLORS.border,
+
+                                      borderBottomWidth:
+                                        1,
+
+                                      borderBottomColor:
+                                        COLORS.border,
+
+                                      backgroundColor:
+                                        slotIndex % 2 ===
+                                        0
+                                          ? COLORS.white
+                                          : COLORS.blueVerySoft,
+                                    }}
+                                  >
+                                    {starting ? (
+                                      <TouchableOpacity
+                                        activeOpacity={
+                                          0.8
+                                        }
+
+                                        onPress={() =>
+                                          openAppointmentDetails(
+                                            starting
+                                          )
+                                        }
+
+                                        style={{
+                                          flex:
+                                            1,
+
+                                          backgroundColor:
+                                            isPaid
+                                              ? COLORS.successSoft
+                                              : 'rgba(23,92,211,0.18)',
+
+                                          borderLeftWidth:
+                                            4,
+
+                                          borderLeftColor:
+                                            isPaid
+                                              ? COLORS.success
+                                              : COLORS.royal,
+
+                                          paddingHorizontal:
+                                            8,
+
+                                          paddingVertical:
+                                            5,
+                                        }}
+                                      >
+                                        <Text
+                                          numberOfLines={
+                                            1
+                                          }
+
+                                          style={{
+                                            color:
+                                              isPaid
+                                                ? COLORS.success
+                                                : COLORS.royalDark,
+
+                                            fontSize:
+                                              10,
+
+                                            fontWeight:
+                                              '900',
+                                          }}
+                                        >
+                                          {
+                                            getClientName(
+                                              starting
+                                            )
+                                          }
+                                        </Text>
+
+                                        <Text
+                                          numberOfLines={
+                                            1
+                                          }
+
+                                          style={{
+                                            color:
+                                              isPaid
+                                                ? COLORS.success
+                                                : COLORS.royal,
+
+                                            fontSize:
+                                              9,
+
+                                            fontWeight:
+                                              '700',
+
+                                            marginTop:
+                                              2,
+                                          }}
+                                        >
+                                          {
+                                            starting.service_name
+                                          }
+                                        </Text>
+                                      </TouchableOpacity>
+                                    ) : continuing ? (
+                                      <TouchableOpacity
+                                        activeOpacity={
+                                          0.8
+                                        }
+
+                                        onPress={() =>
+                                          openAppointmentDetails(
+                                            covering
+                                          )
+                                        }
+
+                                        style={{
+                                          flex:
+                                            1,
+
+                                          backgroundColor:
+                                            isPaid
+                                              ? COLORS.successSoft
+                                              : 'rgba(23,92,211,0.18)',
+
+                                          borderLeftWidth:
+                                            4,
+
+                                          borderLeftColor:
+                                            isPaid
+                                              ? COLORS.success
+                                              : COLORS.royal,
+                                        }}
+                                      />
+                                    ) : (
+                                      <TouchableOpacity
+                                        activeOpacity={
+                                          0.65
+                                        }
+
+                                        onPress={() => {
+                                          if (
+                                            canPickStaff
+                                          ) {
+                                            setStaffId(
+                                              employee.id
+                                            );
+                                          }
+
+                                          setSelectedTime(
+                                            time
+                                          );
+
+                                          openCreate(
+                                            selectedDate
+                                          );
+                                        }}
+
+                                        style={{
+                                          flex:
+                                            1,
+
+                                          alignItems:
+                                            'center',
+
+                                          justifyContent:
+                                            'center',
+                                        }}
+                                      >
+                                        <Text
+                                          style={{
+                                            color:
+                                              COLORS.textMuted,
+
+                                            fontSize:
+                                              9,
+
+                                            fontWeight:
+                                              '600',
+                                          }}
+                                        >
+                                          Available
+                                        </Text>
+                                      </TouchableOpacity>
+                                    )}
+                                  </View>
+                                );
+                              }
+                            )}
+                          </View>
+                        )
+                      )}
+                    </View>
+                  </ScrollView>
+                )}
+              </View>
+
+
+              {/* =================================================
+                  PREVIOUS / NEXT DAY
+              ================================================= */}
+
+              <View
+                style={{
+                  flexDirection:
+                    'row',
+
+                  gap:
+                    10,
+
+                  marginTop:
+                    15,
+                }}
+              >
+                <TouchableOpacity
+                  activeOpacity={
+                    0.8
+                  }
+
+                  onPress={
+                    previousDay
+                  }
+
+                  style={{
+                    flex:
+                      1,
+
+                    minHeight:
+                      50,
+
+                    borderWidth:
+                      1,
+
+                    borderColor:
+                      COLORS.border,
+
+                    borderRadius:
+                      RADIUS.medium,
+
+                    backgroundColor:
+                      COLORS.white,
+
+                    alignItems:
+                      'center',
+
+                    justifyContent:
+                      'center',
+                  }}
+                >
+                  <Text
+                    style={{
+                      color:
+                        COLORS.royal,
+
+                      fontSize:
+                        13,
+
+                      fontWeight:
+                        '900',
+                    }}
+                  >
+                    ← Previous Day
+                  </Text>
+                </TouchableOpacity>
+
+
+                <TouchableOpacity
+                  activeOpacity={
+                    0.8
+                  }
+
+                  onPress={
+                    nextDay
+                  }
+
+                  style={{
+                    flex:
+                      1,
+
+                    minHeight:
+                      50,
+
+                    borderRadius:
+                      RADIUS.medium,
+
+                    backgroundColor:
+                      COLORS.royal,
+
+                    alignItems:
+                      'center',
+
+                    justifyContent:
+                      'center',
+                  }}
+                >
+                  <Text
+                    style={{
+                      color:
+                        COLORS.white,
+
+                      fontSize:
+                        13,
+
+                      fontWeight:
+                        '900',
+                    }}
+                  >
+                    Next Day →
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+        </View>
+      </ScrollView>
+            {/* =====================================================
+          CREATE APPOINTMENT MODAL
+      ===================================================== */}
+
+<Modal
+        visible={
+          createOpen
+        }
+
+        transparent
+
+        animationType={
+          isPhone
+            ? 'slide'
+            : 'fade'
+        }
+
+        onRequestClose={
+          closeCreateModal
+        }
+      >
+        <Pressable
+          style={{
+            flex:
+              1,
+
+            backgroundColor:
+              'rgba(16,24,40,0.45)',
+
+            alignItems:
+              'center',
+
+            justifyContent:
+              'center',
+
+            padding:
+              15,
+          }}
+
+          onPress={
+            closeCreateModal
+          }
+        >
+          <KeyboardAvoidingView
+            behavior={
+              Platform.OS ===
+              'ios'
+                ? 'padding'
+                : undefined
+            }
+
+            style={{
+              width:
+                isPhone
+                  ? '100%'
+                  : 760,
+
+              maxHeight:
+                '94%',
+            }}
+          >
+            <Pressable
+              onPress={() => {}}
+
+              style={{
+                width:
+                  '100%',
+
+                maxHeight:
+                  '100%',
+
+                borderRadius:
+                  24,
+
+                backgroundColor:
+                  COLORS.background,
+
+                overflow:
+                  'hidden',
+
+                ...SHADOWS.floating,
+              }}
+            >
+
+              {/* MODAL HEADER */}
+
+              <View
+                style={{
+                  flexDirection:
+                    'row',
+
+                  alignItems:
+                    'center',
+
+                  justifyContent:
+                    'space-between',
+
+                  gap:
+                    12,
+
+                  padding:
+                    18,
+
+                  backgroundColor:
+                    COLORS.white,
+
+                  borderBottomWidth:
+                    1,
+
+                  borderBottomColor:
+                    COLORS.border,
+                }}
+              >
+                <View
+                  style={{
+                    flex:
+                      1,
+                  }}
+                >
+                  <Text
+                    style={{
+                      color:
+                        COLORS.royalDark,
+
+                      fontSize:
+                        21,
+
+                      fontWeight:
+                        '900',
+                    }}
+                  >
+                    New Appointment
                   </Text>
 
-                  {/* Actions */}
-                  <View style={{ marginTop: 8, flexDirection: 'row', gap: 12 }}>
-                    <View style={{ flex: 1, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
-                      <Button title="Edit" onPress={() => openEditor(item)} color={Platform.OS === 'ios' ? undefined : '#10b981'} />
+                  <Text
+                    style={{
+                      color:
+                        COLORS.textMuted,
+
+                      fontSize:
+                        12,
+
+                      marginTop:
+                        3,
+                    }}
+                  >
+                    {
+                      formatDateLong(
+                        selectedDate
+                      )
+                    }
+                  </Text>
+                </View>
+
+
+                <TouchableOpacity
+                  onPress={() =>
+                    setCreateOpen(
+                      false
+                    )
+                  }
+
+                  style={{
+                    width:
+                      38,
+
+                    height:
+                      38,
+
+                    borderRadius:
+                      19,
+
+                    backgroundColor:
+                      COLORS.surfaceSoft,
+
+                    alignItems:
+                      'center',
+
+                    justifyContent:
+                      'center',
+                  }}
+                >
+                  <Text
+                    style={{
+                      color:
+                        COLORS.text,
+
+                      fontSize:
+                        20,
+                    }}
+                  >
+                    ×
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+
+              <ScrollView
+                keyboardShouldPersistTaps="handled"
+
+                showsVerticalScrollIndicator={
+                  false
+                }
+
+                contentContainerStyle={{
+                  padding:
+                    18,
+
+                  paddingBottom:
+                    30,
+                }}
+              >
+
+                {canPickStaff && (
+                  <View
+                    style={{
+                      marginBottom:
+                        18,
+                    }}
+                  >
+                    <Label>
+                      Booking Type
+                    </Label>
+
+                    <View
+                      style={{
+                        flexDirection:
+                          isPhone
+                            ? 'column'
+                            : 'row',
+
+                        gap:
+                          10,
+                      }}
+                    >
+                      {[
+                        {
+                          value:
+                            'phone',
+
+                          title:
+                            'Phone Booking',
+
+                          description:
+                            'Collect 25% deposit',
+                        },
+
+                        {
+                          value:
+                            'walk_in',
+
+                          title:
+                            'Walk-In',
+
+                          description:
+                            'No deposit required',
+                        },
+                      ].map(
+                        (
+                          option
+                        ) => {
+                          const active =
+                            bookingSource ===
+                            option.value;
+
+                          return (
+                            <TouchableOpacity
+                              key={
+                                option.value
+                              }
+
+                              activeOpacity={
+                                0.8
+                              }
+
+                              onPress={() =>
+                                setBookingSource(
+                                  option.value
+                                )
+                              }
+
+                              style={{
+                                flex:
+                                  1,
+
+                                minHeight:
+                                  68,
+
+                                borderWidth:
+                                  1,
+
+                                borderColor:
+                                  active
+                                    ? COLORS.royal
+                                    : COLORS.border,
+
+                                borderRadius:
+                                  RADIUS.medium,
+
+                                backgroundColor:
+                                  active
+                                    ? COLORS.blueSoft
+                                    : COLORS.white,
+
+                                padding:
+                                  13,
+
+                                justifyContent:
+                                  'center',
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  color:
+                                    active
+                                      ? COLORS.royal
+                                      : COLORS.text,
+
+                                  fontSize:
+                                    14,
+
+                                  fontWeight:
+                                    '900',
+                                }}
+                              >
+                                {
+                                  option.title
+                                }
+                              </Text>
+
+                              <Text
+                                style={{
+                                  color:
+                                    COLORS.textMuted,
+
+                                  fontSize:
+                                    11,
+
+                                  marginTop:
+                                    4,
+                                }}
+                              >
+                                {
+                                  option.description
+                                }
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        }
+                      )}
                     </View>
-                    <View style={{ flex: 1, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
-                      <Button title="Delete" onPress={() => {
-                        Alert.alert('Delete appointment?', 'This cannot be undone.', [
-                          { text: 'Cancel', style: 'cancel' },
-                          { text: 'Delete', style: 'destructive', onPress: () => deleteAppointment(item.id) },
-                        ]);
-                      }} color={Platform.OS === 'ios' ? undefined : '#e11d48'} />
+                  </View>
+                )}
+
+
+                {/* CLIENT */}
+
+                <SelectButton
+                  label="Client"
+
+                  value={
+                    selectedClient
+                      ? `${selectedClient.first_name || ''} ${selectedClient.last_name || ''}`.trim()
+                      : ''
+                  }
+
+                  placeholder="Select a client"
+
+                  onPress={() =>
+                    setClientPickerOpen(
+                      true
+                    )
+                  }
+                />
+
+
+                {/* ADD NEW CLIENT */}
+
+                <TouchableOpacity
+                  activeOpacity={
+                    0.8
+                  }
+
+                  onPress={() =>
+                    setAddingClient(
+                      (
+                        current
+                      ) =>
+                        !current
+                    )
+                  }
+
+                  style={{
+                    minHeight:
+                      46,
+
+                    borderRadius:
+                      RADIUS.medium,
+
+                    borderWidth:
+                      1,
+
+                    borderColor:
+                      COLORS.border,
+
+                    backgroundColor:
+                      addingClient
+                        ? COLORS.blueSoft
+                        : COLORS.white,
+
+                    paddingHorizontal:
+                      14,
+
+                    flexDirection:
+                      'row',
+
+                    alignItems:
+                      'center',
+
+                    justifyContent:
+                      'space-between',
+
+                    marginBottom:
+                      16,
+                  }}
+                >
+                  <Text
+                    style={{
+                      color:
+                        COLORS.royal,
+
+                      fontSize:
+                        13,
+
+                      fontWeight:
+                        '900',
+                    }}
+                  >
+                    + Add New Client
+                  </Text>
+
+                  <Text
+                    style={{
+                      color:
+                        COLORS.royal,
+
+                      fontSize:
+                        18,
+                    }}
+                  >
+                    {
+                      addingClient
+                        ? '−'
+                        : '+'
+                    }
+                  </Text>
+                </TouchableOpacity>
+
+
+                {addingClient && (
+                  <View
+                    style={{
+                      backgroundColor:
+                        COLORS.blueVerySoft,
+
+                      borderWidth:
+                        1,
+
+                      borderColor:
+                        COLORS.border,
+
+                      borderRadius:
+                        RADIUS.large,
+
+                      padding:
+                        15,
+
+                      marginBottom:
+                        18,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.royalDark,
+
+                        fontSize:
+                          15,
+
+                        fontWeight:
+                          '900',
+
+                        marginBottom:
+                          14,
+                      }}
+                    >
+                      New Client
+                    </Text>
+
+
+                    <View
+                      style={{
+                        flexDirection:
+                          isPhone
+                            ? 'column'
+                            : 'row',
+
+                        gap:
+                          10,
+                      }}
+                    >
+                      <View
+                        style={{
+                          flex:
+                            1,
+                        }}
+                      >
+                        <Label>
+                          First Name
+                        </Label>
+
+                        <Input
+                          value={
+                            firstName
+                          }
+
+                          onChangeText={
+                            setFirstName
+                          }
+
+                          placeholder="First name"
+                        />
+                      </View>
+
+
+                      <View
+                        style={{
+                          flex:
+                            1,
+                        }}
+                      >
+                        <Label>
+                          Last Name
+                        </Label>
+
+                        <Input
+                          value={
+                            lastName
+                          }
+
+                          onChangeText={
+                            setLastName
+                          }
+
+                          placeholder="Last name"
+                        />
+                      </View>
+                    </View>
+
+
+                    <View
+                      style={{
+                        flexDirection:
+                          isPhone
+                            ? 'column'
+                            : 'row',
+
+                        gap:
+                          10,
+
+                        marginTop:
+                          12,
+                      }}
+                    >
+                      <View
+                        style={{
+                          flex:
+                            1,
+                        }}
+                      >
+                        <Label>
+                          Phone
+                        </Label>
+
+                        <Input
+                          value={
+                            phone
+                          }
+
+                          onChangeText={
+                            setPhone
+                          }
+
+                          placeholder="Phone"
+
+                          keyboardType="phone-pad"
+                        />
+                      </View>
+
+
+                      <View
+                        style={{
+                          flex:
+                            1,
+                        }}
+                      >
+                        <Label>
+                          Email
+                        </Label>
+
+                        <Input
+                          value={
+                            email
+                          }
+
+                          onChangeText={
+                            setEmail
+                          }
+
+                          placeholder="Email"
+
+                          keyboardType="email-address"
+
+                          autoCapitalize="none"
+                        />
+                      </View>
+                    </View>
+
+
+                    <Button
+                      title="Save Client"
+
+                      style={{
+                        marginTop:
+                          14,
+                      }}
+
+                      onPress={
+                        createClient
+                      }
+                    />
+                  </View>
+                )}
+
+
+                {/* =================================================
+                    SPECIALTY
+                ================================================= */}
+
+                <SelectButton
+                  label="Specialty"
+
+                  value={
+                    specialtyLabel
+                  }
+
+                  placeholder="Choose specialty"
+
+                  onPress={() =>
+                    setSpecialtyPickerOpen(
+                      true
+                    )
+                  }
+                />
+
+
+                {/* =================================================
+                    PROFESSIONAL
+                ================================================= */}
+
+                <SelectButton
+                  label="Professional"
+
+                  value={
+                    selectedStaff
+                      ?.name ||
+                    ''
+                  }
+
+                  placeholder={
+                    !specialtySlug
+                      ? 'Choose specialty first'
+                      : 'Choose professional'
+                  }
+
+                  disabled={
+                    !specialtySlug ||
+                    (
+                      canSelectBookingStaff &&
+                      compatibleStaff.length ===
+                      0
+                    )
+                  }
+
+                  onPress={() => {
+                    if (
+                      canSelectBookingStaff
+                    ) {
+                      setStaffPickerOpen(
+                        true
+                      );
+                    }
+                  }}
+                />
+
+
+                {/* =================================================
+                    SERVICE
+                ================================================= */}
+
+                <SelectButton
+                  label="Service"
+
+                  value={
+                    selectedService
+                      ? `${selectedService.name} • ${selectedService.duration_minutes} min • $${Number(
+                          selectedService.price ||
+                          0
+                        ).toFixed(2)}`
+                      : ''
+                  }
+
+                  placeholder={
+                    !specialtySlug
+                      ? 'Choose specialty first'
+                      : 'Choose service'
+                  }
+
+                  disabled={
+                    !specialtySlug
+                  }
+
+                  onPress={() =>
+                    setServicePickerOpen(
+                      true
+                    )
+                  }
+                />
+
+
+                {/* =================================================
+                    DURATION / PRICE
+                ================================================= */}
+
+                {!!selectedService && (
+                  <View
+                    style={{
+                      flexDirection:
+                        'row',
+
+                      gap:
+                        10,
+
+                      marginBottom:
+                        18,
+                    }}
+                  >
+                    <View
+                      style={{
+                        flex:
+                          1,
+                      }}
+                    >
+                      <Label>
+                        Hours
+                      </Label>
+
+                      <Input
+                        value={
+                          hours
+                        }
+
+                        onChangeText={
+                          setHours
+                        }
+
+                        keyboardType="number-pad"
+                      />
+                    </View>
+
+
+                    <View
+                      style={{
+                        flex:
+                          1,
+                      }}
+                    >
+                      <Label>
+                        Minutes
+                      </Label>
+
+                      <Input
+                        value={
+                          minutesOverride
+                        }
+
+                        onChangeText={
+                          setMinutesOverride
+                        }
+
+                        keyboardType="number-pad"
+                      />
+                    </View>
+
+
+                    <View
+                      style={{
+                        flex:
+                          1,
+                      }}
+                    >
+                      <Label>
+                        Price
+                      </Label>
+
+                      <Input
+                        value={
+                          price
+                        }
+
+                        onChangeText={
+                          setPrice
+                        }
+
+                        keyboardType="decimal-pad"
+                      />
+                    </View>
+                  </View>
+                )}
+
+
+                {/* =================================================
+                    PROFESSIONAL'S BOOKINGS FOR THE DAY
+                ================================================= */}
+
+                {!!staffId && (
+                  <View
+                    style={{
+                      backgroundColor:
+                        COLORS.white,
+
+                      borderWidth:
+                        1,
+
+                      borderColor:
+                        COLORS.border,
+
+                      borderRadius:
+                        RADIUS.large,
+
+                      padding:
+                        15,
+
+                      marginTop:
+                        4,
+
+                      marginBottom:
+                        8,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.royalDark,
+
+                        fontSize:
+                          16,
+
+                        fontWeight:
+                          '900',
+                      }}
+                    >
+                      {
+                        selectedStaff?.name ||
+                        me?.name
+                      }
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          11,
+
+                        marginTop:
+                          3,
+                      }}
+                    >
+                      {
+                        formatDateLong(
+                          selectedDate
+                        )
+                      }
+                    </Text>
+
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textSecondary,
+
+                        fontSize:
+                          12,
+
+                        lineHeight:
+                          18,
+
+                        marginTop:
+                          10,
+
+                        marginBottom:
+                          13,
+                      }}
+                    >
+                      Existing appointments for this professional are shown below.
+                    </Text>
+
+
+                    {appointmentsForStaff(
+                      staffId
+                    ).length ===
+                    0 ? (
+                      <View
+                        style={{
+                          backgroundColor:
+                            COLORS.successSoft,
+
+                          borderRadius:
+                            RADIUS.medium,
+
+                          padding:
+                            13,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color:
+                              COLORS.success,
+
+                            fontWeight:
+                              '900',
+
+                            fontSize:
+                              12,
+                          }}
+                        >
+                          No appointments booked on this day
+                        </Text>
+                      </View>
+                    ) : (
+                      appointmentsForStaff(
+                        staffId
+                      ).map(
+                        (
+                          appointment
+                        ) => {
+                          const paid =
+                              appointment
+                                ?.payment_status ===
+                              'paid';
+
+                            const canOpenAppointment =
+                              me?.role !== 'staff' ||
+                              appointment.staff_id ===
+                                me?.id;
+
+                            return (
+                              <TouchableOpacity
+                              key={
+                                appointment.id
+                              }
+
+                              activeOpacity={
+                                canOpenAppointment
+                                  ? 0.8
+                                  : 1
+                              }
+                              
+                              disabled={
+                                !canOpenAppointment
+                              }
+                              
+                              onPress={() => {
+                                if (
+                                  canOpenAppointment
+                                ) {
+                                  openAppointmentDetails(
+                                    appointment
+                                  );
+                                }
+                              }}
+
+                              style={{
+                                backgroundColor:
+                                  paid
+                                    ? COLORS.successSoft
+                                    : 'rgba(23,92,211,0.12)',
+
+                                borderLeftWidth:
+                                  4,
+
+                                borderLeftColor:
+                                  paid
+                                    ? COLORS.success
+                                    : COLORS.royal,
+
+                                borderRadius:
+                                  RADIUS.medium,
+
+                                padding:
+                                  11,
+
+                                marginBottom:
+                                  8,
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  color:
+                                    paid
+                                      ? COLORS.success
+                                      : COLORS.royal,
+
+                                  fontWeight:
+                                    '900',
+
+                                  fontSize:
+                                    12,
+                                }}
+                              >
+                                {
+                                  formatTime12(
+                                    appointment.start_time
+                                  )
+                                }
+                                {' – '}
+                                {
+                                  formatTime12(
+                                    appointment.end_time
+                                  )
+                                }
+                              </Text>
+
+                              <Text
+                                style={{
+                                  color:
+                                    COLORS.text,
+
+                                  fontWeight:
+                                    '800',
+
+                                  fontSize:
+                                    13,
+
+                                  marginTop:
+                                    3,
+                                }}
+                              >
+                                {
+                                  getClientName(
+                                    appointment
+                                  )
+                                }
+                                {' • '}
+                                {
+                                  appointment.service_name
+                                }
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        }
+                      )
+                    )}
+                  </View>
+                )}
+
+
+                {/* =================================================
+                    AVAILABLE TIMES
+                ================================================= */}
+
+                {!!selectedService &&
+                !!staffId && (
+                  <>
+                    <Text
+                      style={{
+                        color:
+                          COLORS.royalDark,
+
+                        fontSize:
+                          17,
+
+                        fontWeight:
+                          '900',
+
+                        marginTop:
+                          22,
+                      }}
+                    >
+                      Available Start Times
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          12,
+
+                        lineHeight:
+                          18,
+
+                        marginTop:
+                          4,
+
+                        marginBottom:
+                          14,
+                      }}
+                    >
+                      Choose a time that fits the full service duration.
+                    </Text>
+                    <Text>
+                        {
+                          selectedDuration
+                        }
+                        -minute {
+                          selectedService.name
+                        } with {
+                          selectedStaff?.name ||
+                          me?.name
+                        }.
+                      </Text>
+
+
+                      {availableTimes.length ===
+                      0 ? (
+                        <View
+                          style={{
+                            backgroundColor:
+                              COLORS.blueVerySoft,
+
+                            borderRadius:
+                              RADIUS.medium,
+
+                            padding:
+                              18,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textSecondary,
+
+                              textAlign:
+                                'center',
+
+                              fontSize:
+                                13,
+
+                              lineHeight:
+                                19,
+                            }}
+                          >
+                            No available times fit this service on this date.
+                          </Text>
+                        </View>
+                      ) : (
+                        <View
+                          style={{
+                            flexDirection:
+                              'row',
+
+                            flexWrap:
+                              'wrap',
+
+                            gap:
+                              8,
+                          }}
+                        >
+                          {availableTimes.map(
+                            (
+                              time
+                            ) => {
+                              const active =
+                                selectedTime ===
+                                time;
+
+                              return (
+                                <TouchableOpacity
+                                  key={
+                                    time
+                                  }
+
+                                  activeOpacity={
+                                    0.8
+                                  }
+
+                                  onPress={() =>
+                                    setSelectedTime(
+                                      time
+                                    )
+                                  }
+
+                                  style={{
+                                    minWidth:
+                                      92,
+
+                                    minHeight:
+                                      43,
+
+                                    paddingHorizontal:
+                                      11,
+
+                                    borderWidth:
+                                      1,
+
+                                    borderColor:
+                                      active
+                                        ? COLORS.royal
+                                        : COLORS.border,
+
+                                    borderRadius:
+                                      RADIUS.round,
+
+                                    backgroundColor:
+                                      active
+                                        ? COLORS.royal
+                                        : COLORS.white,
+
+                                    alignItems:
+                                      'center',
+
+                                    justifyContent:
+                                      'center',
+                                  }}
+                                >
+                                  <Text
+                                    style={{
+                                      color:
+                                        active
+                                          ? COLORS.white
+                                          : COLORS.royal,
+
+                                      fontSize:
+                                        12,
+
+                                      fontWeight:
+                                        '900',
+                                    }}
+                                  >
+                                    {
+                                      formatTime12(
+                                        time
+                                      )
+                                    }
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            }
+                          )}
+                        </View>
+                      )}
+                    </>
+                  )}
+
+
+                  {groupedBookingItems.length > 0 && (
+                    <View
+                      style={{
+                        marginTop:
+                          18,
+
+                        backgroundColor:
+                          COLORS.blueVerySoft,
+
+                        borderRadius:
+                          RADIUS.medium,
+
+                        padding:
+                          14,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royalDark,
+
+                          fontSize:
+                            13,
+
+                          fontWeight:
+                            '900',
+                        }}
+                      >
+                        {
+                          groupedBookingItems.length
+                        } service{
+                          groupedBookingItems.length === 1
+                            ? ''
+                            : 's'
+                        } already added to this booking
+                      </Text>
+
+                      {groupedBookingItems.map(
+                        (
+                          item,
+                          index
+                        ) => (
+                          <Text
+                            key={
+                              `${item.staff_id}-${item.service_id}-${index}`
+                            }
+
+                            style={{
+                              color:
+                                COLORS.textSecondary,
+
+                              fontSize:
+                                12,
+
+                              lineHeight:
+                                19,
+
+                              marginTop:
+                                7,
+                            }}
+                          >
+                            {item.service_name}
+                            {' with '}
+                            {item.staff_name}
+                            {' • '}
+                            {
+                              formatTime12(
+                                item.time
+                              )
+                            }
+                            {' • $'}
+                            {
+                              Number(
+                                item.price ||
+                                0
+                              ).toFixed(2)
+                            }
+                          </Text>
+                        )
+                      )}
+                    </View>
+                  )}
+
+
+                  {/* =================================================
+                      SUMMARY
+                  ================================================= */}
+
+                  {!!selectedTime && (
+                    <View
+                      style={{
+                        marginTop:
+                          18,
+
+                        backgroundColor:
+                          COLORS.blueSoft,
+
+                        borderRadius:
+                          RADIUS.medium,
+
+                        padding:
+                          14,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royal,
+
+                          fontWeight:
+                            '900',
+
+                          fontSize:
+                            13,
+                        }}
+                      >
+                        Appointment Summary
+                      </Text>
+
+                      <Text
+                        style={{
+                          color:
+                            COLORS.textSecondary,
+
+                          lineHeight:
+                            20,
+
+                          fontSize:
+                            13,
+
+                          marginTop:
+                            7,
+                        }}
+                      >
+                        {
+                          selectedClient
+                            ? `${selectedClient.first_name || ''} ${selectedClient.last_name || ''}`.trim()
+                            : 'No client'
+                        }
+                        {'\n'}
+
+                        {
+                          selectedService?.name
+                        }
+                        {'\n'}
+
+                        {
+                          selectedStaff?.name ||
+                          me?.name
+                        }
+                        {'\n'}
+
+                        {
+                          formatDateLong(
+                            selectedDate
+                          )
+                        }
+                        {' at '}
+                        {
+                          formatTime12(
+                            selectedTime
+                          )
+                        }
+                        {'\n'}
+
+                        {
+                          selectedDuration
+                        }
+                        {' minutes • $'}
+                        {
+                          Number(
+                            price ||
+                            0
+                          ).toFixed(2)
+                        }
+                      </Text>
+                    </View>
+                  )}
+
+
+                  {/* =================================================
+                      CREATE BUTTONS
+                  ================================================= */}
+
+                  <View
+                    style={{
+                      flexDirection:
+                        isPhone
+                          ? 'column'
+                          : 'row',
+
+                      gap:
+                        10,
+
+                      marginTop:
+                        20,
+                    }}
+                  >
+                    <Button
+                      title="Cancel"
+
+                      secondary
+
+                      style={{
+                        flex:
+                          1,
+                      }}
+
+                      disabled={
+                        phoneDepositProcessing
+                      }
+
+                      onPress={
+                        closeCreateModal
+                      }
+                    />
+
+
+                    <Button
+                      title="Add Another Service"
+
+                      secondary
+
+                      style={{
+                        flex:
+                          1.4,
+                      }}
+
+                      disabled={
+                        phoneDepositProcessing ||
+                        !clientId ||
+                        !staffId ||
+                        !selectedService ||
+                        !selectedTime
+                      }
+
+                      onPress={
+                        addAnotherBookingService
+                      }
+                    />
+
+
+                    <Button
+                      title={
+                        phoneDepositProcessing
+                          ? (
+                              phoneDepositStep ||
+                              'Processing deposit...'
+                            )
+                          : (
+                              canPickStaff &&
+                              bookingSource ===
+                                'walk_in'
+                                ? (
+                                    groupedBookingItems.length > 0
+                                      ? 'Create Grouped Walk-In — No Deposit'
+                                      : 'Create Walk-In — No Deposit'
+                                  )
+                                : (
+                                    groupedBookingItems.length > 0
+                                      ? 'Book All & Collect 25% Deposit'
+                                      : 'Book & Collect 25% Deposit'
+                                  )
+                            )
+                      }
+
+                      style={{
+                        flex:
+                          2,
+                      }}
+
+                      disabled={
+                        phoneDepositProcessing ||
+                        !clientId ||
+                        !staffId ||
+                        !selectedService ||
+                        !selectedTime
+                      }
+
+                      onPress={
+                        createAppointment
+                      }
+                    />
+                  </View>
+
+                </ScrollView>
+              </Pressable>
+            </KeyboardAvoidingView>
+          </Pressable>
+        </Modal>
+
+
+        {/* =====================================================
+            CANCELLATION CONFIRMATION MODAL
+        ===================================================== */}
+
+        <Modal
+          visible={
+            deleteConfirmOpen
+          }
+
+          transparent
+
+          animationType="fade"
+
+          onRequestClose={
+            cancelDeleteAppointment
+          }
+        >
+          <Pressable
+            onPress={
+              cancelDeleteAppointment
+            }
+
+            style={{
+              flex:
+                1,
+
+              backgroundColor:
+                'rgba(6,27,69,0.55)',
+
+              alignItems:
+                'center',
+
+              justifyContent:
+                'center',
+
+              padding:
+                20,
+            }}
+          >
+            <Pressable
+              onPress={() => {}}
+
+              style={{
+                width:
+                  '100%',
+
+                maxWidth:
+                  460,
+
+                backgroundColor:
+                  COLORS.white,
+
+                borderRadius:
+                  24,
+
+                padding:
+                  24,
+
+                ...SHADOWS.floating,
+              }}
+            >
+              <View
+                style={{
+                  width:
+                    58,
+
+                  height:
+                    58,
+
+                  borderRadius:
+                    29,
+
+                  backgroundColor:
+                    COLORS.dangerSoft,
+
+                  alignItems:
+                    'center',
+
+                  justifyContent:
+                    'center',
+
+                  alignSelf:
+                    'center',
+
+                  marginBottom:
+                    18,
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      COLORS.danger,
+
+                    fontSize:
+                      26,
+
+                    fontWeight:
+                      '900',
+                  }}
+                >
+                  ×
+                </Text>
+              </View>
+
+
+              <Text
+                style={{
+                  color:
+                    COLORS.royalDark,
+
+                  fontSize:
+                    22,
+
+                  fontWeight:
+                    '900',
+
+                  textAlign:
+                    'center',
+                }}
+              >
+                Cancel Appointment?
+              </Text>
+
+
+              <Text
+                style={{
+                  color:
+                    COLORS.textSecondary,
+
+                  fontSize:
+                    14,
+
+                  lineHeight:
+                    21,
+
+                  textAlign:
+                    'center',
+
+                  marginTop:
+                    10,
+                }}
+              >
+                The appointment will be removed from the calendar but preserved in the client’s history.
+              </Text>
+
+
+              {!!appointmentToDelete && (
+                <View
+                  style={{
+                    backgroundColor:
+                      COLORS.blueVerySoft,
+
+                    borderRadius:
+                      RADIUS.large,
+
+                    padding:
+                      15,
+
+                    marginTop:
+                      20,
+
+                    borderWidth:
+                      1,
+
+                    borderColor:
+                      COLORS.border,
+                  }}
+                >
+                  <Text
+                    style={{
+                      color:
+                        COLORS.royalDark,
+
+                      fontSize:
+                        15,
+
+                      fontWeight:
+                        '900',
+
+                      textAlign:
+                        'center',
+                    }}
+                  >
+                    {
+                      appointmentToDelete.service_name ||
+                      'Appointment'
+                    }
+                  </Text>
+
+
+                  <Text
+                    style={{
+                      color:
+                        COLORS.textSecondary,
+
+                      fontSize:
+                        13,
+
+                      textAlign:
+                        'center',
+
+                      marginTop:
+                        5,
+                    }}
+                  >
+                    {
+                      getClientName(
+                        appointmentToDelete
+                      )
+                    }
+                  </Text>
+
+
+                  <Text
+                    style={{
+                      color:
+                        COLORS.textMuted,
+
+                      fontSize:
+                        12,
+
+                      textAlign:
+                        'center',
+
+                      marginTop:
+                        4,
+                    }}
+                  >
+                    {
+                      formatTime12(
+                        appointmentToDelete.start_time
+                      )
+                    }
+                  </Text>
+                </View>
+              )}
+
+
+              {(
+                Number(
+                  appointmentToDelete
+                    ?.deposit_amount ||
+                  0
+                ) > 0 &&
+                appointmentToDelete
+                  ?.payment_status !==
+                  'unpaid'
+              ) && (
+                <View
+                  style={{
+                    backgroundColor:
+                      COLORS.surfaceSoft,
+
+                    borderRadius:
+                      RADIUS.large,
+
+                    borderWidth:
+                      1,
+
+                    borderColor:
+                      COLORS.border,
+
+                    padding:
+                      15,
+
+                    marginTop:
+                      14,
+                  }}
+                >
+                  <Text
+                    style={{
+                      color:
+                        COLORS.text,
+
+                      fontSize:
+                        15,
+
+                      fontWeight:
+                        '900',
+                    }}
+                  >
+                    Refund Deposit?
+                  </Text>
+
+
+                  <Text
+                    style={{
+                      color:
+                        COLORS.royalDark,
+
+                      fontSize:
+                        21,
+
+                      fontWeight:
+                        '900',
+
+                      marginTop:
+                        5,
+                    }}
+                  >
+                    ${Number(
+                      appointmentToDelete
+                        ?.deposit_amount ||
+                      0
+                    ).toFixed(2)}
+                  </Text>
+
+
+                  <Text
+                    style={{
+                      color:
+                        COLORS.textSecondary,
+
+                      fontSize:
+                        12,
+
+                      lineHeight:
+                        18,
+
+                      marginTop:
+                        8,
+                    }}
+                  >
+                    {
+                      (
+                        new Date(
+                          appointmentToDelete
+                            .start_time
+                        ).getTime() -
+                        Date.now()
+                      ) > 60 * 60 * 1000
+                        ? 'Policy: refund the deposit because the client called more than one hour before the appointment.'
+                        : 'Policy: retain the deposit because the client called within one hour. You may still approve an exception.'
+                    }
+                  </Text>
+                </View>
+              )}
+
+
+              <View
+                style={{
+                  gap:
+                    10,
+
+                  marginTop:
+                    20,
+                }}
+              >
+                {(
+                  Number(
+                    appointmentToDelete
+                      ?.deposit_amount ||
+                    0
+                  ) > 0 &&
+                  appointmentToDelete
+                    ?.payment_status !==
+                    'unpaid'
+                ) ? (
+                  <>
+                    <Button
+                      title={
+                        cancellingAppointment
+                          ? 'Processing...'
+                          : 'Yes — Refund Deposit'
+                      }
+
+                      disabled={
+                        cancellingAppointment
+                      }
+
+                      onPress={() =>
+                        cancelAppointment(
+                          appointmentToDelete,
+                          true
+                        )
+                      }
+                    />
+
+
+                    <Button
+                      title={
+                        cancellingAppointment
+                          ? 'Processing...'
+                          : 'No — Keep Deposit'
+                      }
+
+                      danger
+
+                      disabled={
+                        cancellingAppointment
+                      }
+
+                      onPress={() =>
+                        cancelAppointment(
+                          appointmentToDelete,
+                          false
+                        )
+                      }
+                    />
+                  </>
+                ) : (
+                  <Button
+                    title={
+                      cancellingAppointment
+                        ? 'Cancelling...'
+                        : 'Cancel Appointment'
+                    }
+
+                    danger
+
+                    disabled={
+                      cancellingAppointment ||
+                      !appointmentToDelete
+                    }
+
+                    onPress={() =>
+                      cancelAppointment(
+                        appointmentToDelete,
+                        false
+                      )
+                    }
+                  />
+                )}
+
+
+                <Button
+                  title="Keep Appointment"
+
+                  secondary
+
+                  disabled={
+                    cancellingAppointment
+                  }
+
+                  onPress={
+                    cancelDeleteAppointment
+                  }
+                />
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+
+        {/* =====================================================
+            APPOINTMENT DETAILS MODAL
+        ===================================================== */}
+
+        <Modal
+          visible={
+            !!selectedDayAppointment
+          }
+
+          transparent
+
+          animationType="fade"
+
+          onRequestClose={() =>
+            setSelectedDayAppointment(
+              null
+            )
+          }
+        >
+          <Pressable
+            onPress={() =>
+              setSelectedDayAppointment(
+                null
+              )
+            }
+
+            style={{
+              flex:
+                1,
+
+              backgroundColor:
+                'rgba(16,24,40,0.45)',
+
+              alignItems:
+                'center',
+
+              justifyContent:
+                'center',
+
+              padding:
+                15,
+            }}
+          >
+            <Pressable
+              onPress={() => {}}
+
+              style={{
+                width:
+                  '100%',
+
+                maxWidth:
+                  560,
+
+                maxHeight:
+                  '94%',
+
+                backgroundColor:
+                  COLORS.white,
+
+                borderRadius:
+                  24,
+
+                overflow:
+                  'hidden',
+
+                ...SHADOWS.floating,
+              }}
+            >
+              {!!selectedDayAppointment && (
+                <>
+
+                  {/* HEADER */}
+
+                  <View
+                    style={{
+                      flexDirection:
+                        'row',
+
+                      alignItems:
+                        'center',
+
+                      justifyContent:
+                        'space-between',
+
+                      gap:
+                        10,
+
+                      padding:
+                        18,
+
+                      backgroundColor:
+                        COLORS.white,
+
+                      borderBottomWidth:
+                        1,
+
+                      borderBottomColor:
+                        COLORS.border,
+                    }}
+                  >
+                    <View
+                      style={{
+                        flex:
+                          1,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royalDark,
+
+                          fontSize:
+                            20,
+
+                          fontWeight:
+                            '900',
+                        }}
+                      >
+                        {
+                          selectedDayAppointment.service_name
+                        }
+                      </Text>
+
+                      <Text
+                        style={{
+                          color:
+                            COLORS.textMuted,
+
+                          fontSize:
+                            11,
+
+                          marginTop:
+                            3,
+                        }}
+                      >
+                        Appointment Details
+                      </Text>
+                    </View>
+
+
+                    <TouchableOpacity
+                      onPress={() =>
+                        setSelectedDayAppointment(
+                          null
+                        )
+                      }
+
+                      style={{
+                        width:
+                          38,
+
+                        height:
+                          38,
+
+                        borderRadius:
+                          19,
+
+                        backgroundColor:
+                          COLORS.surfaceSoft,
+
+                        alignItems:
+                          'center',
+
+                        justifyContent:
+                          'center',
+                      }}
+                    >
+                      <Text
+                        style={{
+                          fontSize:
+                            20,
+                        }}
+                      >
+                        ×
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+
+                  <ScrollView
+                    showsVerticalScrollIndicator={
+                      false
+                    }
+
+                    contentContainerStyle={{
+                      padding:
+                        20,
+
+                      paddingBottom:
+                        24,
+                    }}
+                  >
+
+                    {/* CLIENT HERO */}
+
+                    <View
+                      style={{
+                        backgroundColor:
+                          selectedDayAppointment
+                            ?.payment_status ===
+                          'paid'
+                            ? COLORS.successSoft
+                            : COLORS.blueVerySoft,
+
+                        borderRadius:
+                          RADIUS.large,
+
+                        padding:
+                          18,
+
+                        marginBottom:
+                          16,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            selectedDayAppointment
+                              ?.payment_status ===
+                            'paid'
+                              ? COLORS.success
+                              : COLORS.royalDark,
+
+                          fontSize:
+                            20,
+
+                          fontWeight:
+                            '900',
+                        }}
+                      >
+                        {
+                          getClientName(
+                            selectedDayAppointment
+                          )
+                        }
+                      </Text>
+
+
+                      <Text
+                        style={{
+                          color:
+                            selectedDayAppointment
+                              ?.payment_status ===
+                            'paid'
+                              ? COLORS.success
+                              : COLORS.royal,
+
+                          fontSize:
+                            13,
+
+                          fontWeight:
+                            '800',
+
+                          marginTop:
+                            5,
+                        }}
+                      >
+                        {
+                          formatTime12(
+                            selectedDayAppointment.start_time
+                          )
+                        }
+                        {' – '}
+                        {
+                          formatTime12(
+                            selectedDayAppointment.end_time
+                          )
+                        }
+                      </Text>
+
+
+                      {selectedDayAppointment
+                        ?.payment_status ===
+                      'paid' && (
+                        <View
+                          style={{
+                            alignSelf:
+                              'flex-start',
+
+                            backgroundColor:
+                              COLORS.white,
+
+                            paddingHorizontal:
+                              10,
+
+                            paddingVertical:
+                              6,
+
+                            borderRadius:
+                              RADIUS.round,
+
+                            borderWidth:
+                              1,
+
+                            borderColor:
+                              COLORS.success,
+
+                            marginTop:
+                              10,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.success,
+
+                              fontSize:
+                                11,
+
+                              fontWeight:
+                                '900',
+                            }}
+                          >
+                            ✓ Paid
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                                        {/* PROFESSIONAL */}
+
+                                        <View
+                      style={{
+                        flexDirection:
+                          'row',
+
+                        alignItems:
+                          'center',
+
+                        justifyContent:
+                          'space-between',
+
+                        gap:
+                          20,
+
+                        minHeight:
+                          45,
+
+                        borderBottomWidth:
+                          1,
+
+                        borderBottomColor:
+                          COLORS.border,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.textMuted,
+
+                          fontSize:
+                            12,
+
+                          fontWeight:
+                            '700',
+                        }}
+                      >
+                        Professional
+                      </Text>
+
+                      <Text
+                        style={{
+                          flex:
+                            1,
+
+                          textAlign:
+                            'right',
+
+                          color:
+                            COLORS.text,
+
+                          fontSize:
+                            13,
+
+                          fontWeight:
+                            '800',
+                        }}
+                      >
+                        {
+                          getStaffName(
+                            selectedDayAppointment
+                          )
+                        }
+                      </Text>
+                    </View>
+
+
+                    {/* SERVICE */}
+
+                    <View
+                      style={{
+                        flexDirection:
+                          'row',
+
+                        alignItems:
+                          'center',
+
+                        justifyContent:
+                          'space-between',
+
+                        gap:
+                          20,
+
+                        minHeight:
+                          45,
+
+                        borderBottomWidth:
+                          1,
+
+                        borderBottomColor:
+                          COLORS.border,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.textMuted,
+
+                          fontSize:
+                            12,
+
+                          fontWeight:
+                            '700',
+                        }}
+                      >
+                        Service
+                      </Text>
+
+                      <Text
+                        style={{
+                          flex:
+                            1,
+
+                          textAlign:
+                            'right',
+
+                          color:
+                            COLORS.text,
+
+                          fontSize:
+                            13,
+
+                          fontWeight:
+                            '800',
+                        }}
+                      >
+                        {
+                          selectedDayAppointment.service_name
+                        }
+                      </Text>
+                    </View>
+
+
+                    {/* DURATION */}
+
+                    <View
+                      style={{
+                        flexDirection:
+                          'row',
+
+                        alignItems:
+                          'center',
+
+                        justifyContent:
+                          'space-between',
+
+                        gap:
+                          20,
+
+                        minHeight:
+                          45,
+
+                        borderBottomWidth:
+                          1,
+
+                        borderBottomColor:
+                          COLORS.border,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.textMuted,
+
+                          fontSize:
+                            12,
+
+                          fontWeight:
+                            '700',
+                        }}
+                      >
+                        Duration
+                      </Text>
+
+                      <Text
+                        style={{
+                          color:
+                            COLORS.text,
+
+                          fontSize:
+                            13,
+
+                          fontWeight:
+                            '800',
+                        }}
+                      >
+                        {
+                          durationMinutes(
+                            selectedDayAppointment.start_time,
+                            selectedDayAppointment.end_time
+                          )
+                        }
+                        {' minutes'}
+                      </Text>
+                    </View>
+
+
+                    {/* PRICE */}
+
+                    <View
+                      style={{
+                        flexDirection:
+                          'row',
+
+                        alignItems:
+                          'center',
+
+                        justifyContent:
+                          'space-between',
+
+                        gap:
+                          20,
+
+                        minHeight:
+                          45,
+
+                        borderBottomWidth:
+                          1,
+
+                        borderBottomColor:
+                          COLORS.border,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.textMuted,
+
+                          fontSize:
+                            12,
+
+                          fontWeight:
+                            '700',
+                        }}
+                      >
+                        Price
+                      </Text>
+
+                      <Text
+                        style={{
+                          color:
+                            COLORS.text,
+
+                          fontSize:
+                            13,
+
+                          fontWeight:
+                            '800',
+                        }}
+                      >
+                        $
+                        {
+                          Number(
+                            selectedDayAppointment.price ||
+                            0
+                          ).toFixed(2)
+                        }
+                      </Text>
+                    </View>
+
+
+                    {/* PRODUCTS */}
+
+                    <View
+                      style={{
+                        marginTop:
+                          15,
+
+                        padding:
+                          14,
+
+                        borderRadius:
+                          RADIUS.medium,
+
+                        backgroundColor:
+                          COLORS.blueVerySoft,
+
+                        borderWidth:
+                          1,
+
+                        borderColor:
+                          COLORS.border,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royalDark,
+
+                          fontSize:
+                            13,
+
+                          fontWeight:
+                            '900',
+
+                          marginBottom:
+                            10,
+                        }}
+                      >
+                        Products
+                      </Text>
+
+
+                      {appointmentSalesLoading ? (
+                        <ActivityIndicator
+                          size="small"
+
+                          color={
+                            COLORS.royal
+                          }
+                        />
+                      ) : appointmentSales.length ===
+                      0 ? (
+                        <Text
+                          style={{
+                            color:
+                              COLORS.textMuted,
+
+                            fontSize:
+                              12,
+                          }}
+                        >
+                          No products added to this appointment.
+                        </Text>
+                      ) : (
+                        appointmentSales.map(
+                          (
+                            sale
+                          ) => (
+                            <View
+                              key={
+                                sale.sale_id
+                              }
+
+                              style={{
+                                flexDirection:
+                                  'row',
+
+                                alignItems:
+                                  'center',
+
+                                justifyContent:
+                                  'space-between',
+
+                                gap:
+                                  12,
+
+                                paddingVertical:
+                                  8,
+
+                                borderBottomWidth:
+                                  1,
+
+                                borderBottomColor:
+                                  COLORS.border,
+                              }}
+                            >
+                              <View
+                                style={{
+                                  flex:
+                                    1,
+                                }}
+                              >
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.text,
+
+                                    fontSize:
+                                      13,
+
+                                    fontWeight:
+                                      '800',
+                                  }}
+                                >
+                                  {
+                                    sale.name
+                                  }
+                                </Text>
+
+                                {!!sale.staff_name && (
+  <Text
+    style={{
+      color:
+        COLORS.textMuted,
+
+      fontSize:
+        11,
+
+      marginTop:
+        3,
+    }}
+  >
+    Sold by {sale.staff_name}
+  </Text>
+)}
+
+
+{canPickStaff &&
+  ![
+    'paid',
+    'partially_refunded',
+    'refunded',
+  ].includes(
+    selectedDayAppointment
+      ?.payment_status
+  ) && (
+    <TouchableOpacity
+      activeOpacity={
+        0.8
+      }
+
+      disabled={
+        updatingSaleSeller
+      }
+
+      onPress={() => {
+        setSaleSellerTarget(
+          sale
+        );
+
+        setSaleSellerPickerOpen(
+          true
+        );
+      }}
+
+      style={{
+        alignSelf:
+          'flex-start',
+
+        marginTop:
+          5,
+
+        paddingVertical:
+          4,
+
+        paddingHorizontal:
+          8,
+
+        borderRadius:
+          7,
+
+        backgroundColor:
+          COLORS.blueSoft,
+      }}
+    >
+      <Text
+        style={{
+          color:
+            COLORS.royalDark,
+
+          fontSize:
+            11,
+
+          fontWeight:
+            '800',
+        }}
+      >
+        Change Seller
+      </Text>
+    </TouchableOpacity>
+  )}
+
+                                {![
+  'paid',
+  'partially_refunded',
+  'refunded',
+].includes(
+  selectedDayAppointment
+    ?.payment_status
+) ? (
+  <View
+    style={{
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+
+      gap:
+        8,
+
+      marginTop:
+        6,
+    }}
+  >
+    <TouchableOpacity
+      activeOpacity={
+        0.8
+      }
+
+      disabled={
+        Number(
+          sale.quantity
+        ) <= 1
+      }
+
+      onPress={() =>
+        updateProductQuantity(
+          selectedDayAppointment.id,
+          sale.sale_id,
+          Number(
+            sale.quantity
+          ) - 1
+        )
+      }
+
+      style={{
+        width:
+          30,
+
+        height:
+          30,
+
+        borderRadius:
+          8,
+
+        alignItems:
+          'center',
+
+        justifyContent:
+          'center',
+
+        backgroundColor:
+          COLORS.surfaceSoft,
+
+        borderWidth:
+          1,
+
+        borderColor:
+          COLORS.border,
+
+        opacity:
+          Number(
+            sale.quantity
+          ) <= 1
+            ? 0.4
+            : 1,
+      }}
+    >
+      <Text
+        style={{
+          color:
+            COLORS.royal,
+
+          fontSize:
+            18,
+
+          fontWeight:
+            '900',
+        }}
+      >
+        −
+      </Text>
+    </TouchableOpacity>
+
+
+    <Text
+      style={{
+        minWidth:
+          24,
+
+        textAlign:
+          'center',
+
+        color:
+          COLORS.text,
+
+        fontSize:
+          13,
+
+        fontWeight:
+          '800',
+      }}
+    >
+      {
+        sale.quantity
+      }
+    </Text>
+
+
+    <TouchableOpacity
+      activeOpacity={
+        0.8
+      }
+
+      onPress={() =>
+        updateProductQuantity(
+          selectedDayAppointment.id,
+          sale.sale_id,
+          Number(
+            sale.quantity
+          ) + 1
+        )
+      }
+
+      style={{
+        width:
+          30,
+
+        height:
+          30,
+
+        borderRadius:
+          8,
+
+        alignItems:
+          'center',
+
+        justifyContent:
+          'center',
+
+        backgroundColor:
+          COLORS.blueSoft,
+
+        borderWidth:
+          1,
+
+        borderColor:
+          COLORS.royal,
+      }}
+    >
+      <Text
+        style={{
+          color:
+            COLORS.royal,
+
+          fontSize:
+            18,
+
+          fontWeight:
+            '900',
+        }}
+      >
+        +
+      </Text>
+    </TouchableOpacity>
+  </View>
+) : (
+  <Text
+    style={{
+      color:
+        COLORS.textMuted,
+
+      fontSize:
+        11,
+
+      marginTop:
+        2,
+    }}
+  >
+    Qty {
+      sale.quantity
+    }
+  </Text>
+)}
+                              </View>
+
+
+                              <View
+                                style={{
+                                  alignItems:
+                                    'flex-end',
+
+                                  gap:
+                                    6,
+                                }}
+                              >
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.royalDark,
+
+                                    fontSize:
+                                      13,
+
+                                    fontWeight:
+                                      '900',
+                                  }}
+                                >
+                                  ${Number(
+                                    sale.subtotal ||
+                                    0
+                                  ).toFixed(2)}
+                                </Text>
+
+
+                                {![
+                                  'paid',
+                                  'partially_refunded',
+                                  'refunded',
+                                ].includes(
+                                  selectedDayAppointment
+                                    ?.payment_status
+                                ) && (
+                                  <TouchableOpacity
+                                    activeOpacity={
+                                      0.8
+                                    }
+
+                                    onPress={() =>
+                                      removeProductFromAppointment(
+                                        selectedDayAppointment.id,
+                                        sale.sale_id
+                                      )
+                                    }
+
+                                    style={{
+                                      paddingHorizontal:
+                                        10,
+
+                                      paddingVertical:
+                                        6,
+
+                                      borderRadius:
+                                        RADIUS.small,
+
+                                      backgroundColor:
+                                        COLORS.dangerSoft,
+
+                                      borderWidth:
+                                        1,
+
+                                      borderColor:
+                                        COLORS.danger,
+                                    }}
+                                  >
+                                    <Text
+                                      style={{
+                                        color:
+                                          COLORS.danger,
+
+                                        fontSize:
+                                          11,
+
+                                        fontWeight:
+                                          '900',
+                                      }}
+                                    >
+                                      Remove
+                                    </Text>
+                                  </TouchableOpacity>
+                                )}
+                              </View>
+                            </View>
+                          )
+                        )
+                      )}
+                    </View>
+
+
+                    {/* NOTES */}
+
+                    {!!selectedDayAppointment.notes && (
+                      <View
+                        style={{
+                          marginTop:
+                            15,
+
+                          padding:
+                            14,
+
+                          borderRadius:
+                            RADIUS.medium,
+
+                          backgroundColor:
+                            COLORS.surfaceSoft,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color:
+                              COLORS.textMuted,
+
+                            fontSize:
+                              11,
+
+                            fontWeight:
+                              '800',
+                          }}
+                        >
+                          NOTES
+                        </Text>
+
+                        <Text
+                          style={{
+                            color:
+                              COLORS.textSecondary,
+
+                            fontSize:
+                              13,
+
+                            lineHeight:
+                              19,
+
+                            marginTop:
+                              5,
+                          }}
+                        >
+                          {
+                            selectedDayAppointment.notes
+                          }
+                        </Text>
+                      </View>
+                    )}
+
+
+                    {/* PAYMENT STATUS */}
+
+                    {[
+                      'paid',
+                      'partially_refunded',
+                      'refunded',
+                    ].includes(
+                      selectedDayAppointment
+                        ?.payment_status
+                    ) ? (
+                      <>
+                        <View
+                          style={{
+                            marginTop:
+                              20,
+
+                            backgroundColor:
+                              selectedDayAppointment
+                                ?.payment_status ===
+                              'refunded'
+                                ? COLORS.surfaceSoft
+                                : selectedDayAppointment
+                                    ?.payment_status ===
+                                  'partially_refunded'
+                                ? COLORS.blueVerySoft
+                                : COLORS.successSoft,
+
+                            borderRadius:
+                              RADIUS.large,
+
+                            padding:
+                              15,
+
+                            alignItems:
+                              'center',
+
+                            borderWidth:
+                              1,
+
+                            borderColor:
+                              selectedDayAppointment
+                                ?.payment_status ===
+                              'refunded'
+                                ? COLORS.border
+                                : selectedDayAppointment
+                                    ?.payment_status ===
+                                  'partially_refunded'
+                                ? COLORS.royal
+                                : COLORS.success,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                selectedDayAppointment
+                                  ?.payment_status ===
+                                'refunded'
+                                  ? COLORS.textSecondary
+                                  : selectedDayAppointment
+                                      ?.payment_status ===
+                                    'partially_refunded'
+                                  ? COLORS.royal
+                                  : COLORS.success,
+
+                              fontSize:
+                                14,
+
+                              fontWeight:
+                                '900',
+                            }}
+                          >
+                            {
+                              selectedDayAppointment
+                                ?.payment_status ===
+                              'refunded'
+                                ? '↩ Refunded'
+                                : selectedDayAppointment
+                                    ?.payment_status ===
+                                  'partially_refunded'
+                                ? '↩ Partially Refunded'
+                                : '✓ Paid'
+                            }
+                          </Text>
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textSecondary,
+
+                              fontSize:
+                                11,
+
+                              marginTop:
+                                4,
+
+                              textAlign:
+                                'center',
+                            }}
+                          >
+                            {
+                              selectedDayAppointment
+                                ?.payment_status ===
+                              'refunded'
+                                ? 'This visit has been fully refunded. The original transaction remains in payment history.'
+                                : selectedDayAppointment
+                                    ?.payment_status ===
+                                  'partially_refunded'
+                                ? 'Part of this visit has been refunded. Remaining eligible items can still be refunded.'
+                                : 'Payment has been completed and this appointment cannot be deleted.'
+                            }
+                          </Text>
+                        </View>
+
+
+                        {canPickStaff &&
+                          selectedDayAppointment
+                            ?.payment_status !==
+                          'refunded' && (
+                            <Button
+                              title={
+                                selectedDayAppointment
+                                  ?.payment_status ===
+                                'partially_refunded'
+                                  ? 'Refund More'
+                                  : 'Refund'
+                              }
+
+                              secondary
+
+                              style={{
+                                marginTop:
+                                  10,
+                              }}
+
+                              onPress={() =>
+                                openRefund(
+                                  selectedDayAppointment
+                                )
+                              }
+                            />
+                          )}
+                      </>
+                    ) : (
+                      canPickStaff && (
+                        <Button
+                          title="Take Payment"
+
+                          style={{
+                            marginTop:
+                              20,
+                          }}
+
+                          onPress={() =>
+                            openCheckout(
+                              selectedDayAppointment
+                            )
+                          }
+                        />
+                      )
+                    )}
+
+
+                    {/* ACTIONS */}
+
+                    <View
+                      style={{
+                        flexDirection:
+                          'row',
+
+                        gap:
+                          10,
+
+                        marginTop:
+                          10,
+                      }}
+                    >
+                      {![
+                        'paid',
+                        'partially_refunded',
+                        'refunded',
+                      ].includes(
+                        selectedDayAppointment
+                          ?.payment_status
+                      ) && (
+                        <>
+                          <Button
+                            title="Edit Appointment"
+
+                            secondary
+
+                            style={{
+                              flex:
+                                1,
+                            }}
+
+                            onPress={() =>
+                              openEditor(
+                                selectedDayAppointment
+                              )
+                            }
+                          />
+
+                          {canPickStaff && (
+                            <Button
+                              title="Cancel Appointment"
+
+                              danger
+
+                              style={{
+                                flex:
+                                  1,
+                              }}
+
+                              onPress={() =>
+                                openDeleteConfirmation(
+                                  selectedDayAppointment
+                                )
+                              }
+                            />
+                          )}
+                        </>
+                      )}
+                    </View>
+                  </ScrollView>
+                </>
+              )}
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+
+
+        {/* =====================================================
+            REFUND MODAL
+        ===================================================== */}
+
+        <Modal
+          visible={
+            refundOpen
+          }
+
+          transparent
+
+          animationType="fade"
+
+          onRequestClose={
+            closeRefund
+          }
+        >
+          <Pressable
+            onPress={
+              closeRefund
+            }
+
+            style={{
+              flex:
+                1,
+
+              backgroundColor:
+                'rgba(16,24,40,0.48)',
+
+              alignItems:
+                'center',
+
+              justifyContent:
+                'center',
+
+              padding:
+                15,
+            }}
+          >
+            <KeyboardAvoidingView
+              behavior={
+                Platform.OS ===
+                'ios'
+                  ? 'padding'
+                  : undefined
+              }
+
+              style={{
+                width:
+                  isPhone
+                    ? '100%'
+                    : 620,
+
+                maxHeight:
+                  '94%',
+              }}
+            >
+              <Pressable
+                onPress={() => {}}
+
+                style={{
+                  width:
+                    '100%',
+
+                  maxHeight:
+                    '100%',
+
+                  borderRadius:
+                    24,
+
+                  backgroundColor:
+                    COLORS.background,
+
+                  overflow:
+                    'hidden',
+
+                  ...SHADOWS.floating,
+                }}
+              >
+
+                {/* HEADER */}
+
+                <View
+                  style={{
+                    flexDirection:
+                      'row',
+
+                    alignItems:
+                      'center',
+
+                    justifyContent:
+                      'space-between',
+
+                    gap:
+                      12,
+
+                    padding:
+                      18,
+
+                    backgroundColor:
+                      COLORS.white,
+
+                    borderBottomWidth:
+                      1,
+
+                    borderBottomColor:
+                      COLORS.border,
+                  }}
+                >
+                  <View
+                    style={{
+                      flex:
+                        1,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.royalDark,
+
+                        fontSize:
+                          21,
+
+                        fontWeight:
+                          '900',
+                      }}
+                    >
+                      Refund Visit
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          12,
+
+                        marginTop:
+                          3,
+                      }}
+                    >
+                      {
+                        refundAppointment
+                          ? `${refundAppointment.service_name} • ${getClientName(
+                              refundAppointment
+                            )}`
+                          : 'Choose what should be refunded'
+                      }
+                    </Text>
+                  </View>
+
+
+                  <TouchableOpacity
+                    onPress={
+                      closeRefund
+                    }
+
+                    disabled={
+                      refundSubmitting
+                    }
+
+                    style={{
+                      width:
+                        38,
+
+                      height:
+                        38,
+
+                      borderRadius:
+                        19,
+
+                      backgroundColor:
+                        COLORS.surfaceSoft,
+
+                      alignItems:
+                        'center',
+
+                      justifyContent:
+                        'center',
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.text,
+
+                        fontSize:
+                          20,
+                      }}
+                    >
+                      ×
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+
+                <ScrollView
+                  showsVerticalScrollIndicator={
+                    false
+                  }
+
+                  keyboardShouldPersistTaps="handled"
+
+                  contentContainerStyle={{
+                    padding:
+                      18,
+
+                    paddingBottom:
+                      28,
+                  }}
+                >
+                  {refundLoading ? (
+                    <View
+                      style={{
+                        paddingVertical:
+                          55,
+
+                        alignItems:
+                          'center',
+
+                        justifyContent:
+                          'center',
+                      }}
+                    >
+                      <ActivityIndicator
+                        size="large"
+
+                        color={
+                          COLORS.royal
+                        }
+                      />
+
+                      <Text
+                        style={{
+                          color:
+                            COLORS.textMuted,
+
+                          marginTop:
+                            12,
+                        }}
+                      >
+                        Loading refund details...
+                      </Text>
+                    </View>
+                  ) : !refundSummary ? (
+                    <View
+                      style={{
+                        padding:
+                          18,
+
+                        borderRadius:
+                          RADIUS.large,
+
+                        backgroundColor:
+                          COLORS.dangerSoft,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.danger,
+
+                          fontWeight:
+                            '800',
+                        }}
+                      >
+                        Refund information could not be loaded.
+                      </Text>
+                    </View>
+                  ) : (
+                    <>
+
+                      {/* CURRENT PAYMENT STATUS */}
+
+                      <View
+                        style={{
+                          padding:
+                            15,
+
+                          borderRadius:
+                            RADIUS.large,
+
+                          backgroundColor:
+                            COLORS.blueVerySoft,
+
+                          borderWidth:
+                            1,
+
+                          borderColor:
+                            COLORS.border,
+
+                          marginBottom:
+                            14,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color:
+                              COLORS.textMuted,
+
+                            fontSize:
+                              11,
+
+                            fontWeight:
+                              '800',
+                          }}
+                        >
+                          PAYMENT STATUS
+                        </Text>
+
+                        <Text
+                          style={{
+                            color:
+                              COLORS.royalDark,
+
+                            fontSize:
+                              17,
+
+                            fontWeight:
+                              '900',
+
+                            marginTop:
+                              3,
+
+                            textTransform:
+                              'capitalize',
+                          }}
+                        >
+                          {
+                            String(
+                              refundSummary
+                                ?.payment_status ||
+                              'paid'
+                            ).replace(
+                              /_/g,
+                              ' '
+                            )
+                          }
+                        </Text>
+
+
+                        {Number(
+                          refundSummary
+                            ?.refunded_total ||
+                          0
+                        ) > 0 && (
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textSecondary,
+
+                              fontSize:
+                                12,
+
+                              marginTop:
+                                6,
+                            }}
+                          >
+                            Already refunded: $
+                            {Number(
+                              refundSummary
+                                ?.refunded_total ||
+                              0
+                            ).toFixed(2)}
+                          </Text>
+                        )}
+                      </View>
+
+
+                      {/* QUICK ACTIONS */}
+
+                      <View
+                        style={{
+                          flexDirection:
+                            'row',
+
+                          flexWrap:
+                            'wrap',
+
+                          gap:
+                            8,
+
+                          marginBottom:
+                            16,
+                        }}
+                      >
+                        <TouchableOpacity
+                          activeOpacity={
+                            0.8
+                          }
+
+                          onPress={
+                            selectFullRefund
+                          }
+
+                          disabled={
+                            refundSubmitting
+                          }
+
+                          style={{
+                            minHeight:
+                              42,
+
+                            paddingHorizontal:
+                              15,
+
+                            borderRadius:
+                              RADIUS.round,
+
+                            backgroundColor:
+                              COLORS.white,
+
+                            borderWidth:
+                              1,
+
+                            borderColor:
+                              COLORS.border,
+
+                            alignItems:
+                              'center',
+
+                            justifyContent:
+                              'center',
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.royal,
+
+                              fontSize:
+                                13,
+
+                              fontWeight:
+                                '900',
+                            }}
+                          >
+                            Select Everything
+                          </Text>
+                        </TouchableOpacity>
+
+
+                        <TouchableOpacity
+                          activeOpacity={
+                            0.8
+                          }
+
+                          onPress={
+                            clearRefundSelection
+                          }
+
+                          disabled={
+                            refundSubmitting
+                          }
+
+                          style={{
+                            minHeight:
+                              42,
+
+                            paddingHorizontal:
+                              15,
+
+                            borderRadius:
+                              RADIUS.round,
+
+                            backgroundColor:
+                              COLORS.white,
+
+                            borderWidth:
+                              1,
+
+                            borderColor:
+                              COLORS.border,
+
+                            alignItems:
+                              'center',
+
+                            justifyContent:
+                              'center',
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textSecondary,
+
+                              fontSize:
+                                13,
+
+                              fontWeight:
+                                '800',
+                            }}
+                          >
+                            Clear
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+
+
+                      {/* SERVICE */}
+
+                      <View
+                        style={{
+                          backgroundColor:
+                            COLORS.white,
+
+                          borderWidth:
+                            1,
+
+                          borderColor:
+                            COLORS.border,
+
+                          borderRadius:
+                            RADIUS.large,
+
+                          padding:
+                            15,
+
+                          marginBottom:
+                            12,
+                        }}
+                      >
+                        <TouchableOpacity
+                          activeOpacity={
+                            0.8
+                          }
+
+                          disabled={
+                            refundSummary
+                              ?.refunded_service ||
+                            refundSubmitting
+                          }
+
+                          onPress={() =>
+                            setRefundService(
+                              !refundService
+                            )
+                          }
+
+                          style={{
+                            flexDirection:
+                              'row',
+
+                            alignItems:
+                              'center',
+
+                            justifyContent:
+                              'space-between',
+
+                            gap:
+                              12,
+
+                            opacity:
+                              refundSummary
+                                ?.refunded_service
+                                ? 0.55
+                                : 1,
+                          }}
+                        >
+                          <View
+                            style={{
+                              flex:
+                                1,
+
+                              flexDirection:
+                                'row',
+
+                              alignItems:
+                                'center',
+
+                              gap:
+                                12,
+                            }}
+                          >
+                            <View
+                              style={{
+                                width:
+                                  24,
+
+                                height:
+                                  24,
+
+                                borderRadius:
+                                  7,
+
+                                borderWidth:
+                                  2,
+
+                                borderColor:
+                                  refundSummary
+                                    ?.refunded_service
+                                    ? COLORS.border
+                                    : refundService
+                                    ? COLORS.royal
+                                    : COLORS.border,
+
+                                backgroundColor:
+                                  refundService
+                                    ? COLORS.royal
+                                    : COLORS.white,
+
+                                alignItems:
+                                  'center',
+
+                                justifyContent:
+                                  'center',
+                              }}
+                            >
+                              {refundService && (
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.white,
+
+                                    fontWeight:
+                                      '900',
+                                  }}
+                                >
+                                  ✓
+                                </Text>
+                              )}
+                            </View>
+
+
+                            <View
+                              style={{
+                                flex:
+                                  1,
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  color:
+                                    COLORS.text,
+
+                                  fontSize:
+                                    14,
+
+                                  fontWeight:
+                                    '800',
+                                }}
+                              >
+                                {
+                                  refundSummary
+                                    ?.service_name ||
+                                  refundAppointment
+                                    ?.service_name ||
+                                  'Service'
+                                }
+                              </Text>
+
+                              <Text
+                                style={{
+                                  color:
+                                    refundSummary
+                                      ?.refunded_service
+                                      ? COLORS.success
+                                      : COLORS.textMuted,
+
+                                  fontSize:
+                                    11,
+
+                                  marginTop:
+                                    3,
+
+                                  fontWeight:
+                                    refundSummary
+                                      ?.refunded_service
+                                      ? '800'
+                                      : '500',
+                                }}
+                              >
+                                {
+                                  refundSummary
+                                    ?.refunded_service
+                                    ? 'Refunded ✓'
+                                    : 'Refund service and applicable tax'
+                                }
+                              </Text>
+                            </View>
+                          </View>
+
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.text,
+
+                              fontSize:
+                                14,
+
+                              fontWeight:
+                                '900',
+                            }}
+                          >
+                            $
+                            {(
+                              Number(
+                                refundSummary
+                                  ?.service_subtotal ||
+                                0
+                              ) +
+                              Number(
+                                refundSummary
+                                  ?.service_tax ||
+                                0
+                              )
+                            ).toFixed(2)}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+
+
+                      {/* PRODUCTS */}
+
+                      {(
+                        refundProducts.length >
+                        0
+                      ) && (
+                        <View
+                          style={{
+                            backgroundColor:
+                              COLORS.white,
+
+                            borderWidth:
+                              1,
+
+                            borderColor:
+                              COLORS.border,
+
+                            borderRadius:
+                              RADIUS.large,
+
+                            padding:
+                              15,
+
+                            marginBottom:
+                              12,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.royalDark,
+
+                              fontSize:
+                                15,
+
+                              fontWeight:
+                                '900',
+
+                              marginBottom:
+                                12,
+                            }}
+                          >
+                            Products
+                          </Text>
+
+
+                          {refundProducts.map(
+                            (
+                              item,
+                              index
+                            ) => {
+                              const alreadyRefunded =
+                                (
+                                  refundSummary
+                                    ?.refunded_sale_ids ||
+                                  []
+                                ).includes(
+                                  item.sale_id
+                                );
+
+                              const selected =
+                                refundSaleIds.includes(
+                                  item.sale_id
+                                );
+
+                              const productTotal =
+                                Number(
+                                  item.subtotal ||
+                                  0
+                                ) +
+                                Number(
+                                  item.tax ||
+                                  item.tax_amount ||
+                                  0
+                                );
+
+                              return (
+                                <TouchableOpacity
+                                  key={
+                                    String(
+                                      item.sale_id
+                                    )
+                                  }
+
+                                  activeOpacity={
+                                    0.8
+                                  }
+
+                                  disabled={
+                                    alreadyRefunded ||
+                                    refundSubmitting
+                                  }
+
+                                  onPress={() =>
+                                    toggleRefundSale(
+                                      item.sale_id
+                                    )
+                                  }
+
+                                  style={{
+                                    flexDirection:
+                                      'row',
+
+                                    alignItems:
+                                      'center',
+
+                                    justifyContent:
+                                      'space-between',
+
+                                    gap:
+                                      12,
+
+                                    paddingVertical:
+                                      11,
+
+                                    borderTopWidth:
+                                      index ===
+                                      0
+                                        ? 0
+                                        : 1,
+
+                                    borderTopColor:
+                                      COLORS.border,
+
+                                    opacity:
+                                      alreadyRefunded
+                                        ? 0.55
+                                        : 1,
+                                  }}
+                                >
+                                  <View
+                                    style={{
+                                      flex:
+                                        1,
+
+                                      flexDirection:
+                                        'row',
+
+                                      alignItems:
+                                        'center',
+
+                                      gap:
+                                        12,
+                                    }}
+                                  >
+                                    <View
+                                      style={{
+                                        width:
+                                          24,
+
+                                        height:
+                                          24,
+
+                                        borderRadius:
+                                          7,
+
+                                        borderWidth:
+                                          2,
+
+                                        borderColor:
+                                          alreadyRefunded
+                                            ? COLORS.border
+                                            : selected
+                                            ? COLORS.royal
+                                            : COLORS.border,
+
+                                        backgroundColor:
+                                          selected
+                                            ? COLORS.royal
+                                            : COLORS.white,
+
+                                        alignItems:
+                                          'center',
+
+                                        justifyContent:
+                                          'center',
+                                      }}
+                                    >
+                                      {selected && (
+                                        <Text
+                                          style={{
+                                            color:
+                                              COLORS.white,
+
+                                            fontWeight:
+                                              '900',
+                                          }}
+                                        >
+                                          ✓
+                                        </Text>
+                                      )}
+                                    </View>
+
+
+                                    <View
+                                      style={{
+                                        flex:
+                                          1,
+                                      }}
+                                    >
+                                      <Text
+                                        style={{
+                                          color:
+                                            COLORS.text,
+
+                                          fontSize:
+                                            14,
+
+                                          fontWeight:
+                                            '800',
+                                        }}
+                                      >
+                                        {item.name}
+                                      </Text>
+
+                                      <Text
+                                        style={{
+                                          color:
+                                            alreadyRefunded
+                                              ? COLORS.success
+                                              : COLORS.textMuted,
+
+                                          fontSize:
+                                            11,
+
+                                          marginTop:
+                                            3,
+
+                                          fontWeight:
+                                            alreadyRefunded
+                                              ? '800'
+                                              : '500',
+                                        }}
+                                      >
+                                        {
+                                          alreadyRefunded
+                                            ? 'Refunded ✓'
+                                            : `Qty ${item.quantity || 1}${
+                                                item.staff_name
+                                                  ? ` • Sold by ${item.staff_name}`
+                                                  : ''
+                                              }`
+                                        }
+                                      </Text>
+                                    </View>
+                                  </View>
+
+
+                                  <Text
+                                    style={{
+                                      color:
+                                        COLORS.text,
+
+                                      fontSize:
+                                        14,
+
+                                      fontWeight:
+                                        '900',
+                                    }}
+                                  >
+                                    $
+                                    {productTotal.toFixed(
+                                      2
+                                    )}
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            }
+                          )}
+                        </View>
+                      )}
+
+
+                      {/* TIP */}
+
+                      {Number(
+                        refundSummary?.tip ||
+                        0
+                      ) > 0 && (
+                        <View
+                          style={{
+                            backgroundColor:
+                              COLORS.white,
+
+                            borderWidth:
+                              1,
+
+                            borderColor:
+                              COLORS.border,
+
+                            borderRadius:
+                              RADIUS.large,
+
+                            padding:
+                              15,
+
+                            marginBottom:
+                              12,
+                          }}
+                        >
+                          <TouchableOpacity
+                            activeOpacity={
+                              0.8
+                            }
+
+                            disabled={
+                              refundSummary
+                                ?.refunded_tip ||
+                              refundSubmitting
+                            }
+
+                            onPress={() =>
+                              setRefundTip(
+                                !refundTip
+                              )
+                            }
+
+                            style={{
+                              flexDirection:
+                                'row',
+
+                              alignItems:
+                                'center',
+
+                              justifyContent:
+                                'space-between',
+
+                              gap:
+                                12,
+
+                              opacity:
+                                refundSummary
+                                  ?.refunded_tip
+                                  ? 0.55
+                                  : 1,
+                            }}
+                          >
+                            <View
+                              style={{
+                                flex:
+                                  1,
+
+                                flexDirection:
+                                  'row',
+
+                                alignItems:
+                                  'center',
+
+                                gap:
+                                  12,
+                              }}
+                            >
+                              <View
+                                style={{
+                                  width:
+                                    24,
+
+                                  height:
+                                    24,
+
+                                  borderRadius:
+                                    7,
+
+                                  borderWidth:
+                                    2,
+
+                                  borderColor:
+                                    refundSummary
+                                      ?.refunded_tip
+                                      ? COLORS.border
+                                      : refundTip
+                                      ? COLORS.royal
+                                      : COLORS.border,
+
+                                  backgroundColor:
+                                    refundTip
+                                      ? COLORS.royal
+                                      : COLORS.white,
+
+                                  alignItems:
+                                    'center',
+
+                                  justifyContent:
+                                    'center',
+                                }}
+                              >
+                                {refundTip && (
+                                  <Text
+                                    style={{
+                                      color:
+                                        COLORS.white,
+
+                                      fontWeight:
+                                        '900',
+                                    }}
+                                  >
+                                    ✓
+                                  </Text>
+                                )}
+                              </View>
+
+
+                              <View>
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.text,
+
+                                    fontSize:
+                                      14,
+
+                                    fontWeight:
+                                      '800',
+                                  }}
+                                >
+                                  Tip
+                                </Text>
+
+                                <Text
+                                  style={{
+                                    color:
+                                      refundSummary
+                                        ?.refunded_tip
+                                        ? COLORS.success
+                                        : COLORS.textMuted,
+
+                                    fontSize:
+                                      11,
+
+                                    marginTop:
+                                      3,
+
+                                    fontWeight:
+                                      refundSummary
+                                        ?.refunded_tip
+                                        ? '800'
+                                        : '500',
+                                  }}
+                                >
+                                  {
+                                    refundSummary
+                                      ?.refunded_tip
+                                      ? 'Refunded ✓'
+                                      : 'Return the original tip'
+                                  }
+                                </Text>
+                              </View>
+                            </View>
+
+
+                            <Text
+                              style={{
+                                color:
+                                  COLORS.text,
+
+                                fontSize:
+                                  14,
+
+                                fontWeight:
+                                  '900',
+                              }}
+                            >
+                              $
+                              {(
+                                Number(
+                                  refundSummary
+                                    ?.tip ||
+                                  0
+                                ) +
+                                Number(
+                                  refundSummary
+                                    ?.tip_tax ||
+                                  0
+                                )
+                              ).toFixed(2)}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
+
+
+                      {/* REASON */}
+
+                      <View
+                        style={{
+                          backgroundColor:
+                            COLORS.white,
+
+                          borderWidth:
+                            1,
+
+                          borderColor:
+                            COLORS.border,
+
+                          borderRadius:
+                            RADIUS.large,
+
+                          padding:
+                            15,
+
+                          marginBottom:
+                            14,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color:
+                              COLORS.royalDark,
+
+                            fontSize:
+                              14,
+
+                            fontWeight:
+                              '900',
+
+                            marginBottom:
+                              8,
+                          }}
+                        >
+                          Reason
+                        </Text>
+
+                        <TextInput
+                          value={
+                            refundReason
+                          }
+
+                          onChangeText={
+                            setRefundReason
+                          }
+
+                          editable={
+                            !refundSubmitting
+                          }
+
+                          placeholder="Optional refund reason"
+
+                          placeholderTextColor={
+                            COLORS.textMuted
+                          }
+
+                          multiline
+
+                          style={{
+                            minHeight:
+                              82,
+
+                            borderWidth:
+                              1,
+
+                            borderColor:
+                              COLORS.border,
+
+                            borderRadius:
+                              RADIUS.medium,
+
+                            padding:
+                              12,
+
+                            color:
+                              COLORS.text,
+
+                            backgroundColor:
+                              COLORS.background,
+
+                            textAlignVertical:
+                              'top',
+                          }}
+                        />
+                      </View>
+
+
+                      {/* REFUND TOTAL */}
+
+                      <View
+                        style={{
+                          backgroundColor:
+                            COLORS.blueVerySoft,
+
+                          borderRadius:
+                            RADIUS.large,
+
+                          padding:
+                            16,
+
+                          borderWidth:
+                            1,
+
+                          borderColor:
+                            COLORS.royal,
+
+                          marginBottom:
+                            14,
+                        }}
+                      >
+                        <View
+                          style={{
+                            flexDirection:
+                              'row',
+
+                            alignItems:
+                              'center',
+
+                            justifyContent:
+                              'space-between',
+
+                            gap:
+                              12,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.royalDark,
+
+                              fontSize:
+                                15,
+
+                              fontWeight:
+                                '900',
+                            }}
+                          >
+                            Refund Total
+                          </Text>
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.royal,
+
+                              fontSize:
+                                22,
+
+                              fontWeight:
+                                '900',
+                            }}
+                          >
+                            $
+                            {Number(
+                              selectedRefundTotal ||
+                              0
+                            ).toFixed(2)}
+                          </Text>
+                        </View>
+                      </View>
+
+
+                      <Button
+                        title={
+                          refundSubmitting
+                            ? 'Processing Refund...'
+                            : `Refund $${Number(
+                                selectedRefundTotal ||
+                                0
+                              ).toFixed(2)}`
+                        }
+
+                        danger
+
+                        disabled={
+                          refundSubmitting ||
+                          selectedRefundTotal <=
+                            0
+                        }
+
+                        onPress={
+                          submitRefund
+                        }
+                      />
+
+
+                      <Button
+                        title="Cancel"
+
+                        secondary
+
+                        disabled={
+                          refundSubmitting
+                        }
+
+                        style={{
+                          marginTop:
+                            10,
+                        }}
+
+                        onPress={
+                          closeRefund
+                        }
+                      />
+                    </>
+                  )}
+                </ScrollView>
+              </Pressable>
+            </KeyboardAvoidingView>
+          </Pressable>
+        </Modal>
+
+
+        {/* =====================================================
+            RECEPTIONIST CHECKOUT MODAL
+        ===================================================== */}
+
+        <Modal
+          visible={
+            checkoutOpen
+          }
+
+          transparent
+
+          animationType="fade"
+
+          onRequestClose={
+            closeCheckout
+          }
+        >
+          <Pressable
+            onPress={
+              closeCheckout
+            }
+
+            style={{
+              flex:
+                1,
+
+              backgroundColor:
+                'rgba(16,24,40,0.45)',
+
+              alignItems:
+                'center',
+
+              justifyContent:
+                'center',
+
+              padding:
+                15,
+            }}
+          >
+            <KeyboardAvoidingView
+              behavior={
+                Platform.OS ===
+                'ios'
+                  ? 'padding'
+                  : undefined
+              }
+
+              style={{
+                width:
+                  isPhone
+                    ? '100%'
+                    : 620,
+
+                maxHeight:
+                  '94%',
+              }}
+            >
+              <Pressable
+                onPress={() => {}}
+
+                style={{
+                  width:
+                    '100%',
+
+                  maxHeight:
+                    '100%',
+
+                  borderRadius:
+                    24,
+
+                  backgroundColor:
+                    COLORS.background,
+
+                  overflow:
+                    'hidden',
+
+                  ...SHADOWS.floating,
+                }}
+              >
+
+                {/* CHECKOUT HEADER */}
+
+                <View
+                  style={{
+                    flexDirection:
+                      'row',
+
+                    alignItems:
+                      'center',
+
+                    justifyContent:
+                      'space-between',
+
+                    padding:
+                      18,
+
+                    backgroundColor:
+                      COLORS.white,
+
+                    borderBottomWidth:
+                      1,
+
+                    borderBottomColor:
+                      COLORS.border,
+                  }}
+                >
+                  <View
+                    style={{
+                      flex:
+                        1,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.royalDark,
+
+                        fontSize:
+                          21,
+
+                        fontWeight:
+                          '900',
+                      }}
+                    >
+                      Take Payment
+                    </Text>
+
+                    <Text
+                      style={{
+                        color:
+                          COLORS.textMuted,
+
+                        fontSize:
+                          12,
+
+                        marginTop:
+                          3,
+                      }}
+                    >
+                      {
+                        checkoutAppointment
+                          ? `${checkoutAppointment.service_name} • ${getClientName(
+                              checkoutAppointment
+                            )}`
+                          : 'Appointment checkout'
+                      }
+                    </Text>
+                  </View>
+
+
+                  <TouchableOpacity
+                    onPress={
+                      closeCheckout
+                    }
+
+                    disabled={
+                      paymentSubmitting
+                    }
+
+                    style={{
+                      width:
+                        38,
+
+                      height:
+                        38,
+
+                      borderRadius:
+                        19,
+
+                      backgroundColor:
+                        COLORS.surfaceSoft,
+
+                      alignItems:
+                        'center',
+
+                      justifyContent:
+                        'center',
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          COLORS.text,
+
+                        fontSize:
+                          20,
+                      }}
+                    >
+                      ×
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+
+                <ScrollView
+                  showsVerticalScrollIndicator={
+                    false
+                  }
+
+                  keyboardShouldPersistTaps="handled"
+
+                  contentContainerStyle={{
+                    padding:
+                      18,
+
+                    paddingBottom:
+                      28,
+                  }}
+                >
+                  {(
+                    paymentLoading ||
+                    paymentSubmitting
+                  ) ? (
+                    <View
+                      style={{
+                        paddingVertical:
+                          45,
+
+                        alignItems:
+                          'center',
+
+                        justifyContent:
+                          'center',
+                      }}
+                    >
+                      <ActivityIndicator
+                        size="large"
+
+                        color={
+                          COLORS.royal
+                        }
+                      />
+
+                      <Text
+                        style={{
+                          color:
+                            COLORS.textMuted,
+
+                          marginTop:
+                            12,
+                        }}
+                      >
+                        Loading ticket...
+                      </Text>
+                    </View>
+                  ) : groupPaymentSummary?.is_grouped ? (
+                    <View>
+                      <View
+                        style={{
+                          backgroundColor:
+                            COLORS.blueVerySoft,
+
+                          borderRadius:
+                            RADIUS.medium,
+
+                          padding:
+                            14,
+
+                          marginBottom:
+                            16,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color:
+                              COLORS.royalDark,
+
+                            fontSize:
+                              16,
+
+                            fontWeight:
+                              '900',
+                          }}
+                        >
+                          Combined Checkout
+                        </Text>
+
+                        <Text
+                          style={{
+                            color:
+                              COLORS.textSecondary,
+
+                            fontSize:
+                              12,
+
+                            lineHeight:
+                              18,
+
+                            marginTop:
+                              5,
+                          }}
+                        >
+                          {
+                            groupPaymentSummary
+                              .items
+                              .length
+                          } services will be paid together. Each professional’s balance and tip are recorded separately.
+                        </Text>
+                      </View>
+
+
+                      {groupPaymentSummary.items.map(
+                        (
+                          item,
+                          index
+                        ) => {
+                          const itemKey =
+                            String(
+                              item.appointment_id
+                            );
+
+                          const tipSetting =
+                            groupTipChoices[
+                              itemKey
+                            ] || {
+                              choice:
+                                'none',
+
+                              custom:
+                                '',
+                            };
+
+                          const tipAmount =
+                            groupTipAmountForItem(
+                              item
+                            );
+
+                          const amountDue =
+                            groupAmountDueForItem(
+                              item
+                            );
+
+                          return (
+                            <View
+                              key={
+                                itemKey
+                              }
+
+                              style={{
+                                borderWidth:
+                                  1,
+
+                                borderColor:
+                                  COLORS.border,
+
+                                borderRadius:
+                                  RADIUS.medium,
+
+                                padding:
+                                  14,
+
+                                marginBottom:
+                                  14,
+                              }}
+                            >
+                              <View
+                                style={{
+                                  flexDirection:
+                                    'row',
+
+                                  justifyContent:
+                                    'space-between',
+
+                                  alignItems:
+                                    'flex-start',
+
+                                  gap:
+                                    12,
+                                }}
+                              >
+                                <View
+                                  style={{
+                                    flex:
+                                      1,
+                                  }}
+                                >
+                                  <Text
+                                    style={{
+                                      color:
+                                        COLORS.textMuted,
+
+                                      fontSize:
+                                        11,
+
+                                      fontWeight:
+                                        '800',
+
+                                      textTransform:
+                                        'uppercase',
+                                    }}
+                                  >
+                                    Service {
+                                      index + 1
+                                    }
+                                  </Text>
+
+                                  <Text
+                                    style={{
+                                      color:
+                                        COLORS.text,
+
+                                      fontSize:
+                                        16,
+
+                                      fontWeight:
+                                        '900',
+
+                                      marginTop:
+                                        4,
+                                    }}
+                                  >
+                                    {
+                                      item.service_name
+                                    }
+                                  </Text>
+
+                                  <Text
+                                    style={{
+                                      color:
+                                        COLORS.royalDark,
+
+                                      fontSize:
+                                        13,
+
+                                      fontWeight:
+                                        '800',
+
+                                      marginTop:
+                                        4,
+                                    }}
+                                  >
+                                    With {
+                                      item.staff_name
+                                    }
+                                  </Text>
+                                </View>
+
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.text,
+
+                                    fontSize:
+                                      17,
+
+                                    fontWeight:
+                                      '900',
+                                  }}
+                                >
+                                  ${Number(
+                                    amountDue
+                                  ).toFixed(2)}
+                                </Text>
+                              </View>
+
+
+                              <View
+                                style={{
+                                  height:
+                                    1,
+
+                                  backgroundColor:
+                                    COLORS.border,
+
+                                  marginVertical:
+                                    13,
+                                }}
+                              />
+
+
+                              <View
+                                style={{
+                                  flexDirection:
+                                    'row',
+
+                                  justifyContent:
+                                    'space-between',
+
+                                  marginBottom:
+                                    6,
+                                }}
+                              >
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.textSecondary,
+
+                                    fontSize:
+                                      12,
+                                  }}
+                                >
+                                  Service
+                                </Text>
+
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.text,
+
+                                    fontSize:
+                                      12,
+
+                                    fontWeight:
+                                      '800',
+                                  }}
+                                >
+                                  ${Number(
+                                    item.service_subtotal ||
+                                    0
+                                  ).toFixed(2)}
+                                </Text>
+                              </View>
+
+
+                              {Number(
+                                item.product_subtotal ||
+                                0
+                              ) > 0 && (
+                                <View
+                                  style={{
+                                    flexDirection:
+                                      'row',
+
+                                    justifyContent:
+                                      'space-between',
+
+                                    marginBottom:
+                                      6,
+                                  }}
+                                >
+                                  <Text
+                                    style={{
+                                      color:
+                                        COLORS.textSecondary,
+
+                                      fontSize:
+                                        12,
+                                    }}
+                                  >
+                                    Products
+                                  </Text>
+
+                                  <Text
+                                    style={{
+                                      color:
+                                        COLORS.text,
+
+                                      fontSize:
+                                        12,
+
+                                      fontWeight:
+                                        '800',
+                                    }}
+                                  >
+                                    ${Number(
+                                      item.product_subtotal
+                                    ).toFixed(2)}
+                                  </Text>
+                                </View>
+                              )}
+
+
+                              <View
+                                style={{
+                                  flexDirection:
+                                    'row',
+
+                                  justifyContent:
+                                    'space-between',
+
+                                  marginBottom:
+                                    6,
+                                }}
+                              >
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.textSecondary,
+
+                                    fontSize:
+                                      12,
+                                  }}
+                                >
+                                  Tax
+                                </Text>
+
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.text,
+
+                                    fontSize:
+                                      12,
+
+                                    fontWeight:
+                                      '800',
+                                  }}
+                                >
+                                  ${(
+                                    Number(
+                                      item.service_tax ||
+                                      0
+                                    ) +
+                                    Number(
+                                      item.product_tax ||
+                                      0
+                                    )
+                                  ).toFixed(2)}
+                                </Text>
+                              </View>
+
+
+                              <View
+                                style={{
+                                  flexDirection:
+                                    'row',
+
+                                  justifyContent:
+                                    'space-between',
+
+                                  marginBottom:
+                                    13,
+                                }}
+                              >
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.textSecondary,
+
+                                    fontSize:
+                                      12,
+                                  }}
+                                >
+                                  Already paid / deposit
+                                </Text>
+
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.royalDark,
+
+                                    fontSize:
+                                      12,
+
+                                    fontWeight:
+                                      '900',
+                                  }}
+                                >
+                                  − ${Number(
+                                    item.paid_total ||
+                                    0
+                                  ).toFixed(2)}
+                                </Text>
+                              </View>
+
+
+                              <Text
+                                style={{
+                                  color:
+                                    COLORS.text,
+
+                                  fontSize:
+                                    13,
+
+                                  fontWeight:
+                                    '900',
+
+                                  marginBottom:
+                                    9,
+                                }}
+                              >
+                                Tip for {
+                                  item.staff_name
+                                }
+                              </Text>
+
+
+                              <View
+                                style={{
+                                  flexDirection:
+                                    'row',
+
+                                  flexWrap:
+                                    'wrap',
+
+                                  gap:
+                                    7,
+                                }}
+                              >
+                                {[
+                                  {
+                                    id:
+                                      'none',
+
+                                    label:
+                                      'No Tip',
+                                  },
+                                  {
+                                    id:
+                                      '15',
+
+                                    label:
+                                      '15%',
+                                  },
+                                  {
+                                    id:
+                                      '20',
+
+                                    label:
+                                      '20%',
+                                  },
+                                  {
+                                    id:
+                                      '25',
+
+                                    label:
+                                      '25%',
+                                  },
+                                  {
+                                    id:
+                                      'custom',
+
+                                    label:
+                                      'Custom',
+                                  },
+                                ].map(
+                                  (
+                                    choice
+                                  ) => {
+                                    const active =
+                                      tipSetting.choice ===
+                                      choice.id;
+
+                                    return (
+                                      <TouchableOpacity
+                                        key={
+                                          choice.id
+                                        }
+
+                                        activeOpacity={
+                                          0.85
+                                        }
+
+                                        onPress={() =>
+                                          setGroupTipChoices(
+                                            (
+                                              current
+                                            ) => ({
+                                              ...current,
+
+                                              [
+                                                itemKey
+                                              ]: {
+                                                ...(
+                                                  current[
+                                                    itemKey
+                                                  ] ||
+                                                  {}
+                                                ),
+
+                                                choice:
+                                                  choice.id,
+                                              },
+                                            })
+                                          )
+                                        }
+
+                                        style={{
+                                          borderWidth:
+                                            1,
+
+                                          borderColor:
+                                            active
+                                              ? COLORS.royal
+                                              : COLORS.border,
+
+                                          backgroundColor:
+                                            active
+                                              ? COLORS.royal
+                                              : COLORS.white,
+
+                                          borderRadius:
+                                            RADIUS.medium,
+
+                                          paddingHorizontal:
+                                            12,
+
+                                          paddingVertical:
+                                            9,
+                                        }}
+                                      >
+                                        <Text
+                                          style={{
+                                            color:
+                                              active
+                                                ? COLORS.white
+                                                : COLORS.text,
+
+                                            fontSize:
+                                              12,
+
+                                            fontWeight:
+                                              '800',
+                                          }}
+                                        >
+                                          {
+                                            choice.label
+                                          }
+                                        </Text>
+                                      </TouchableOpacity>
+                                    );
+                                  }
+                                )}
+                              </View>
+
+
+                              {tipSetting.choice ===
+                                'custom' && (
+                                <View
+                                  style={{
+                                    marginTop:
+                                      10,
+                                  }}
+                                >
+                                  <Label>
+                                    Custom Tip
+                                  </Label>
+
+                                  <Input
+                                    value={
+                                      tipSetting.custom ||
+                                      ''
+                                    }
+
+                                    onChangeText={(
+                                      value
+                                    ) =>
+                                      setGroupTipChoices(
+                                        (
+                                          current
+                                        ) => ({
+                                          ...current,
+
+                                          [
+                                            itemKey
+                                          ]: {
+                                            ...(
+                                              current[
+                                                itemKey
+                                              ] ||
+                                              {}
+                                            ),
+
+                                            choice:
+                                              'custom',
+
+                                            custom:
+                                              value,
+                                          },
+                                        })
+                                      )
+                                    }
+
+                                    placeholder="0.00"
+
+                                    keyboardType="decimal-pad"
+                                  />
+                                </View>
+                              )}
+
+
+                              <View
+                                style={{
+                                  flexDirection:
+                                    'row',
+
+                                  justifyContent:
+                                    'space-between',
+
+                                  alignItems:
+                                    'center',
+
+                                  backgroundColor:
+                                    COLORS.blueVerySoft,
+
+                                  borderRadius:
+                                    RADIUS.medium,
+
+                                  padding:
+                                    11,
+
+                                  marginTop:
+                                    12,
+                                }}
+                              >
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.textSecondary,
+
+                                    fontSize:
+                                      12,
+
+                                    fontWeight:
+                                      '700',
+                                  }}
+                                >
+                                  Tip
+                                </Text>
+
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.royalDark,
+
+                                    fontSize:
+                                      14,
+
+                                    fontWeight:
+                                      '900',
+                                  }}
+                                >
+                                  ${Number(
+                                    tipAmount
+                                  ).toFixed(2)}
+                                </Text>
+                              </View>
+                            </View>
+                          );
+                        }
+                      )}
+
+
+                      <View
+                        style={{
+                          backgroundColor:
+                            COLORS.royalDark,
+
+                          borderRadius:
+                            RADIUS.medium,
+
+                          padding:
+                            16,
+
+                          marginTop:
+                            3,
+
+                          marginBottom:
+                            16,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color:
+                              COLORS.white,
+
+                            fontSize:
+                              12,
+
+                            fontWeight:
+                              '800',
+
+                            opacity:
+                              0.8,
+                          }}
+                        >
+                          TOTAL DUE FOR ALL SERVICES
+                        </Text>
+
+                        <Text
+                          style={{
+                            color:
+                              COLORS.white,
+
+                            fontSize:
+                              28,
+
+                            fontWeight:
+                              '900',
+
+                            marginTop:
+                              5,
+                          }}
+                        >
+                          ${Number(
+                            groupCheckoutAmountDue
+                          ).toFixed(2)}
+                        </Text>
+                      </View>
+
+
+                      <Text
+                        style={{
+                          color:
+                            COLORS.text,
+
+                          fontSize:
+                            13,
+
+                          fontWeight:
+                            '900',
+
+                          marginBottom:
+                            9,
+                        }}
+                      >
+                        Payment Method
+                      </Text>
+
+
+                      <View
+                        style={{
+                          flexDirection:
+                            'row',
+
+                          gap:
+                            9,
+
+                          marginBottom:
+                            14,
+                        }}
+                      >
+                        {[
+                          {
+                            id:
+                              'card',
+
+                            label:
+                              'Card',
+                          },
+                          {
+                            id:
+                              'cash',
+
+                            label:
+                              'Cash',
+                          },
+                        ].map(
+                          (
+                            method
+                          ) => {
+                            const active =
+                              paymentMethod ===
+                              method.id;
+
+                            return (
+                              <TouchableOpacity
+                                key={
+                                  method.id
+                                }
+
+                                activeOpacity={
+                                  0.85
+                                }
+
+                                onPress={() =>
+                                  setPaymentMethod(
+                                    method.id
+                                  )
+                                }
+
+                                style={{
+                                  flex:
+                                    1,
+
+                                  minHeight:
+                                    46,
+
+                                  alignItems:
+                                    'center',
+
+                                  justifyContent:
+                                    'center',
+
+                                  borderWidth:
+                                    1,
+
+                                  borderColor:
+                                    active
+                                      ? COLORS.royal
+                                      : COLORS.border,
+
+                                  backgroundColor:
+                                    active
+                                      ? COLORS.blueVerySoft
+                                      : COLORS.white,
+
+                                  borderRadius:
+                                    RADIUS.medium,
+                                }}
+                              >
+                                <Text
+                                  style={{
+                                    color:
+                                      active
+                                        ? COLORS.royalDark
+                                        : COLORS.textSecondary,
+
+                                    fontSize:
+                                      13,
+
+                                    fontWeight:
+                                      '900',
+                                  }}
+                                >
+                                  {
+                                    method.label
+                                  }
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          }
+                        )}
+                      </View>
+
+
+                      <TouchableOpacity
+                        activeOpacity={
+                          0.85
+                        }
+
+                        disabled={
+                          paymentSubmitting ||
+                          groupCheckoutAmountDue <=
+                          0
+                        }
+
+                        onPress={
+                          paymentMethod ===
+                          'cash'
+                            ? completeCashPayment
+                            : completeCardPayment
+                        }
+
+                        style={{
+                          minHeight:
+                            50,
+
+                          borderRadius:
+                            RADIUS.medium,
+
+                          alignItems:
+                            'center',
+
+                          justifyContent:
+                            'center',
+
+                          backgroundColor:
+                            COLORS.royal,
+
+                          opacity:
+                            (
+                              paymentSubmitting ||
+                              groupCheckoutAmountDue <=
+                              0
+                            )
+                              ? 0.55
+                              : 1,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color:
+                              COLORS.white,
+
+                            fontSize:
+                              14,
+
+                            fontWeight:
+                              '900',
+                          }}
+                        >
+                          {
+                            paymentSubmitting
+                              ? 'Processing...'
+                              : paymentMethod ===
+                                'cash'
+                              ? `Record Combined Cash • $${groupCheckoutAmountDue.toFixed(2)}`
+                              : `Continue to Combined Card • $${groupCheckoutAmountDue.toFixed(2)}`
+                          }
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : !paymentSummary ? (
+                    <View
+                      style={{
+                        padding:
+                          20,
+
+                        backgroundColor:
+                          COLORS.dangerSoft,
+
+                        borderRadius:
+                          RADIUS.large,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.danger,
+
+                          fontWeight:
+                            '800',
+                        }}
+                      >
+                        The checkout summary could not be loaded.
+                      </Text>
+
+                      <Button
+                        title="Try Again"
+                        secondary
+
+                        style={{
+                          marginTop:
+                            14,
+                        }}
+
+                        onPress={() =>
+                          loadPaymentSummary(
+                            checkoutAppointment?.id
+                          )
+                        }
+                      />
+                    </View>
+                  ) : (
+                    <>
+
+                      {/* PAYMENT STATUS */}
+
+                      <View
+                        style={{
+                          backgroundColor:
+                            paymentSummary.payment_status ===
+                            'paid'
+                              ? COLORS.successSoft
+                              : COLORS.blueVerySoft,
+
+                          borderRadius:
+                            RADIUS.large,
+
+                          padding:
+                            15,
+
+                          marginBottom:
+                            14,
+
+                          flexDirection:
+                            'row',
+
+                          alignItems:
+                            'center',
+
+                          justifyContent:
+                            'space-between',
+
+                          gap:
+                            12,
+                        }}
+                      >
+                        <View>
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textMuted,
+
+                              fontSize:
+                                11,
+
+                              fontWeight:
+                                '800',
+                            }}
+                          >
+                            PAYMENT STATUS
+                          </Text>
+
+                          <Text
+                            style={{
+                              color:
+                                paymentSummary.payment_status ===
+                                'paid'
+                                  ? COLORS.success
+                                  : COLORS.royal,
+
+                              fontSize:
+                                17,
+
+                              fontWeight:
+                                '900',
+
+                              marginTop:
+                                3,
+
+                              textTransform:
+                                'capitalize',
+                            }}
+                          >
+                            {
+                              String(
+                                paymentSummary.payment_status ||
+                                'unpaid'
+                              ).replace(
+                                '_',
+                                ' '
+                              )
+                            }
+                          </Text>
+                        </View>
+
+
+                        <TouchableOpacity
+                          onPress={() =>
+                            loadPaymentSummary(
+                              checkoutAppointment?.id
+                            )
+                          }
+
+                          style={{
+                            paddingHorizontal:
+                              13,
+
+                            minHeight:
+                              38,
+
+                            borderRadius:
+                              RADIUS.round,
+
+                            backgroundColor:
+                              COLORS.white,
+
+                            borderWidth:
+                              1,
+
+                            borderColor:
+                              COLORS.border,
+
+                            alignItems:
+                              'center',
+
+                            justifyContent:
+                              'center',
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.royal,
+
+                              fontSize:
+                                12,
+
+                              fontWeight:
+                                '900',
+                            }}
+                          >
+                            Refresh
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+
+
+                      {/* TICKET */}
+
+                      <View
+                        style={{
+                          backgroundColor:
+                            COLORS.white,
+
+                          borderWidth:
+                            1,
+
+                          borderColor:
+                            COLORS.border,
+
+                          borderRadius:
+                            RADIUS.large,
+
+                          padding:
+                            16,
+
+                          marginBottom:
+                            14,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color:
+                              COLORS.royalDark,
+
+                            fontSize:
+                              16,
+
+                            fontWeight:
+                              '900',
+
+                            marginBottom:
+                              14,
+                          }}
+                        >
+                          Ticket
+                        </Text>
+
+
+                        <View
+                          style={{
+                            flexDirection:
+                              'row',
+
+                            justifyContent:
+                              'space-between',
+
+                            gap:
+                              12,
+
+                            marginBottom:
+                              10,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              flex:
+                                1,
+
+                              color:
+                                COLORS.textSecondary,
+
+                              fontSize:
+                                14,
+                            }}
+                          >
+                            {
+                              paymentSummary.service_name ||
+                              checkoutAppointment?.service_name ||
+                              'Service'
+                            }
+                          </Text>
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.text,
+
+                              fontSize:
+                                14,
+
+                              fontWeight:
+                                '800',
+                            }}
+                          >
+                            ${Number(
+                              paymentSummary.service_subtotal ||
+                              0
+                            ).toFixed(2)}
+                          </Text>
+                        </View>
+
+
+                        {(
+                          paymentSummary.products ||
+                          []
+                        ).map(
+                          (
+                            item
+                          ) => (
+                            <View
+                              key={
+                                String(
+                                  item.sale_id
+                                )
+                              }
+
+                              style={{
+                                flexDirection:
+                                  'row',
+
+                                justifyContent:
+                                  'space-between',
+
+                                alignItems:
+                                  'flex-start',
+
+                                gap:
+                                  12,
+
+                                marginBottom:
+                                  10,
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  flex:
+                                    1,
+
+                                  color:
+                                    COLORS.textSecondary,
+
+                                  fontSize:
+                                    14,
+                                }}
+                              >
+ <View
+  style={{
+    flex:
+      1,
+  }}
+>
+  <Text
+    style={{
+      color:
+        COLORS.textSecondary,
+
+      fontSize:
+        14,
+  }}
+  >
+    {item.name}
+  </Text>
+
+
+  {paymentSummary
+    ?.payment_status !==
+  'paid' ? (
+    <View
+      style={{
+        flexDirection:
+          'row',
+
+        alignItems:
+          'center',
+
+        gap:
+          8,
+
+        marginTop:
+          7,
+      }}
+    >
+      <TouchableOpacity
+        activeOpacity={
+          0.8
+        }
+
+        disabled={
+          Number(
+            item.quantity
+          ) <= 1 ||
+          paymentLoading ||
+          paymentSubmitting
+        }
+
+        onPress={() =>
+          updateProductQuantity(
+            checkoutAppointment.id,
+            item.sale_id,
+            Number(
+              item.quantity
+            ) - 1
+          )
+        }
+
+        style={{
+          width:
+            30,
+
+          height:
+            30,
+
+          borderRadius:
+            8,
+
+          alignItems:
+            'center',
+
+          justifyContent:
+            'center',
+
+          backgroundColor:
+            COLORS.surfaceSoft,
+
+          borderWidth:
+            1,
+
+          borderColor:
+            COLORS.border,
+
+          opacity:
+            Number(
+              item.quantity
+            ) <= 1 ||
+            paymentLoading ||
+            paymentSubmitting
+              ? 0.4
+              : 1,
+        }}
+      >
+        <Text
+          style={{
+            color:
+              COLORS.royal,
+
+            fontSize:
+              18,
+
+            fontWeight:
+              '900',
+          }}
+        >
+          −
+        </Text>
+      </TouchableOpacity>
+
+
+      <Text
+        style={{
+          minWidth:
+            24,
+
+          textAlign:
+            'center',
+
+          color:
+            COLORS.text,
+
+          fontSize:
+            13,
+
+          fontWeight:
+            '800',
+        }}
+      >
+        {
+          item.quantity
+        }
+      </Text>
+
+
+      <TouchableOpacity
+        activeOpacity={
+          0.8
+        }
+
+        disabled={
+          paymentLoading ||
+          paymentSubmitting
+        }
+
+        onPress={() =>
+          updateProductQuantity(
+            checkoutAppointment.id,
+            item.sale_id,
+            Number(
+              item.quantity
+            ) + 1
+          )
+        }
+
+        style={{
+          width:
+            30,
+
+          height:
+            30,
+
+          borderRadius:
+            8,
+
+          alignItems:
+            'center',
+
+          justifyContent:
+            'center',
+
+          backgroundColor:
+            COLORS.blueSoft,
+
+          borderWidth:
+            1,
+
+          borderColor:
+            COLORS.royal,
+
+          opacity:
+            paymentLoading ||
+            paymentSubmitting
+              ? 0.4
+              : 1,
+        }}
+      >
+        <Text
+          style={{
+            color:
+              COLORS.royal,
+
+            fontSize:
+              18,
+
+            fontWeight:
+              '900',
+          }}
+        >
+          +
+        </Text>
+      </TouchableOpacity>
+    </View>
+  ) : (
+    <Text
+      style={{
+        color:
+          COLORS.textMuted,
+
+        fontSize:
+          12,
+
+        marginTop:
+          4,
+      }}
+    >
+      Qty {
+        item.quantity
+      }
+    </Text>
+  )}
+</View>
+                              </Text>
+
+
+                              <View
+                                style={{
+                                  alignItems:
+                                    'flex-end',
+
+                                  gap:
+                                    6,
+                                }}
+                              >
+                                <Text
+                                  style={{
+                                    color:
+                                      COLORS.text,
+
+                                    fontSize:
+                                      14,
+
+                                    fontWeight:
+                                      '800',
+                                  }}
+                                >
+                                  ${Number(
+                                    item.subtotal ||
+                                    0
+                                  ).toFixed(2)}
+                                </Text>
+
+
+                                {paymentSummary
+                                  ?.payment_status !==
+                                'paid' && (
+                                  <TouchableOpacity
+                                    activeOpacity={
+                                      0.8
+                                    }
+
+                                    disabled={
+                                      paymentLoading ||
+                                      paymentSubmitting
+                                    }
+
+                                    onPress={() =>
+                                      removeProductFromAppointment(
+                                        checkoutAppointment.id,
+                                        item.sale_id
+                                      )
+                                    }
+
+                                    style={{
+                                      paddingHorizontal:
+                                        10,
+
+                                      paddingVertical:
+                                        6,
+
+                                      borderRadius:
+                                        RADIUS.small,
+
+                                      backgroundColor:
+                                        COLORS.dangerSoft,
+
+                                      borderWidth:
+                                        1,
+
+                                      borderColor:
+                                        COLORS.danger,
+
+                                      opacity:
+                                        paymentLoading ||
+                                        paymentSubmitting
+                                          ? 0.5
+                                          : 1,
+                                    }}
+                                  >
+                                    <Text
+                                      style={{
+                                        color:
+                                          COLORS.danger,
+
+                                        fontSize:
+                                          11,
+
+                                        fontWeight:
+                                          '900',
+                                      }}
+                                    >
+                                      Remove
+                                    </Text>
+                                  </TouchableOpacity>
+                                )}
+                              </View>
+                            </View>
+                          )
+                        )}
+
+
+                        <View
+                          style={{
+                            height:
+                              1,
+
+                            backgroundColor:
+                              COLORS.border,
+
+                            marginVertical:
+                              10,
+                          }}
+                        />
+
+
+                        <View
+                          style={{
+                            flexDirection:
+                              'row',
+
+                            justifyContent:
+                              'space-between',
+
+                            marginBottom:
+                              8,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textMuted,
+
+                              fontSize:
+                                13,
+                            }}
+                          >
+                            Subtotal
+                          </Text>
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.text,
+
+                              fontWeight:
+                                '800',
+                            }}
+                          >
+                            ${Number(
+                              paymentSummary.subtotal ||
+                              0
+                            ).toFixed(2)}
+                          </Text>
+                        </View>
+
+
+                        <View
+                          style={{
+                            flexDirection:
+                              'row',
+
+                            justifyContent:
+                              'space-between',
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textMuted,
+
+                              fontSize:
+                                13,
+                            }}
+                          >
+                            Tax
+                          </Text>
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.text,
+
+                              fontWeight:
+                                '800',
+                            }}
+                          >
+                            ${(
+                              Number(
+                                paymentSummary.service_tax ||
+                                0
+                              ) +
+                              Number(
+                                paymentSummary.product_tax ||
+                                0
+                              )
+                            ).toFixed(2)}
+                          </Text>
+                        </View>
+                      </View>
+
+
+                      {/* TIP */}
+
+                      {paymentSummary.payment_status !==
+                        'paid' && (
+                        <View
+                          style={{
+                            backgroundColor:
+                              COLORS.white,
+
+                            borderWidth:
+                              1,
+
+                            borderColor:
+                              COLORS.border,
+
+                            borderRadius:
+                              RADIUS.large,
+
+                            padding:
+                              16,
+
+                            marginBottom:
+                              14,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.royalDark,
+
+                              fontSize:
+                                16,
+
+                              fontWeight:
+                                '900',
+                            }}
+                          >
+                            Tip
+                          </Text>
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textMuted,
+
+                              fontSize:
+                                12,
+
+                              marginTop:
+                                4,
+
+                              marginBottom:
+                                13,
+                            }}
+                          >
+                            Tip percentages are calculated from the pre-tax ticket subtotal.
+                          </Text>
+
+
+                          <View
+                            style={{
+                              flexDirection:
+                                'row',
+
+                              flexWrap:
+                                'wrap',
+
+                              gap:
+                                8,
+                            }}
+                          >
+                            {[
+                              {
+                                key:
+                                  'none',
+
+                                label:
+                                  'None',
+                              },
+
+                              {
+                                key:
+                                  '15',
+
+                                label:
+                                  '15%',
+                              },
+
+                              {
+                                key:
+                                  '20',
+
+                                label:
+                                  '20%',
+                              },
+
+                              {
+                                key:
+                                  '25',
+
+                                label:
+                                  '25%',
+                              },
+
+                              {
+                                key:
+                                  'custom',
+
+                                label:
+                                  'Custom',
+                              },
+                            ].map(
+                              (
+                                option
+                              ) => {
+                                const active =
+                                  checkoutTipChoice ===
+                                  option.key;
+
+                                return (
+                                  <TouchableOpacity
+                                    key={
+                                      option.key
+                                    }
+
+                                    onPress={() =>
+                                      setCheckoutTipChoice(
+                                        option.key
+                                      )
+                                    }
+
+                                    style={{
+                                      minHeight:
+                                        42,
+
+                                      paddingHorizontal:
+                                        15,
+
+                                      borderRadius:
+                                        RADIUS.round,
+
+                                      borderWidth:
+                                        1,
+
+                                      borderColor:
+                                        active
+                                          ? COLORS.royal
+                                          : COLORS.border,
+
+                                      backgroundColor:
+                                        active
+                                          ? COLORS.blueSoft
+                                          : COLORS.white,
+
+                                      alignItems:
+                                        'center',
+
+                                      justifyContent:
+                                        'center',
+                                    }}
+                                  >
+                                    <Text
+                                      style={{
+                                        color:
+                                          active
+                                            ? COLORS.royal
+                                            : COLORS.textSecondary,
+
+                                        fontSize:
+                                          13,
+
+                                        fontWeight:
+                                          '900',
+                                      }}
+                                    >
+                                      {
+                                        option.label
+                                      }
+                                    </Text>
+                                  </TouchableOpacity>
+                                );
+                              }
+                            )}
+                          </View>
+
+
+                          {checkoutTipChoice ===
+                            'custom' && (
+                            <View
+                              style={{
+                                marginTop:
+                                  13,
+                              }}
+                            >
+                              <Label>
+                                Custom tip amount
+                              </Label>
+
+                              <Input
+                                value={
+                                  customTip
+                                }
+
+                                onChangeText={
+                                  setCustomTip
+                                }
+
+                                keyboardType="decimal-pad"
+
+                                placeholder="0.00"
+                              />
+                            </View>
+                          )}
+
+
+                          <View
+                            style={{
+                              flexDirection:
+                                'row',
+
+                              justifyContent:
+                                'space-between',
+
+                              alignItems:
+                                'center',
+
+                              marginTop:
+                                14,
+                            }}
+                          >
+                            <Text
+                              style={{
+                                color:
+                                  COLORS.textMuted,
+
+                                fontSize:
+                                  13,
+                              }}
+                            >
+                              Selected tip
+                            </Text>
+
+                            <Text
+                              style={{
+                                color:
+                                  COLORS.royalDark,
+
+                                fontSize:
+                                  17,
+
+                                fontWeight:
+                                  '900',
+                              }}
+                            >
+                              ${checkoutTipAmount.toFixed(
+                                2
+                              )}
+                            </Text>
+                          </View>
+                        </View>
+                      )}
+
+
+                      {/* PAYMENT METHOD */}
+
+                      {paymentSummary.payment_status !==
+                        'paid' && (
+                        <View
+                          style={{
+                            backgroundColor:
+                              COLORS.white,
+
+                            borderWidth:
+                              1,
+
+                            borderColor:
+                              COLORS.border,
+
+                            borderRadius:
+                              RADIUS.large,
+
+                            padding:
+                              16,
+
+                            marginBottom:
+                              14,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.royalDark,
+
+                              fontSize:
+                                16,
+
+                              fontWeight:
+                                '900',
+
+                              marginBottom:
+                                12,
+                            }}
+                          >
+                            Payment Method
+                          </Text>
+
+                          <View
+                            style={{
+                              flexDirection:
+                                'row',
+
+                              gap:
+                                10,
+                            }}
+                          >
+                            {[
+                              {
+                                key:
+                                  'card',
+
+                                label:
+                                  'Card',
+                              },
+
+                              {
+                                key:
+                                  'cash',
+
+                                label:
+                                  'Cash',
+                              },
+                            ].map(
+                              (
+                                option
+                              ) => {
+                                const active =
+                                  paymentMethod ===
+                                  option.key;
+
+                                return (
+                                  <TouchableOpacity
+                                    key={
+                                      option.key
+                                    }
+
+                                    onPress={() =>
+                                      setPaymentMethod(
+                                        option.key
+                                      )
+                                    }
+
+                                    style={{
+                                      flex:
+                                        1,
+
+                                      minHeight:
+                                        52,
+
+                                      borderRadius:
+                                        RADIUS.medium,
+
+                                      borderWidth:
+                                        1,
+
+                                      borderColor:
+                                        active
+                                          ? COLORS.royal
+                                          : COLORS.border,
+
+                                      backgroundColor:
+                                        active
+                                          ? COLORS.blueSoft
+                                          : COLORS.white,
+
+                                      alignItems:
+                                        'center',
+
+                                      justifyContent:
+                                        'center',
+                                    }}
+                                  >
+                                    <Text
+                                      style={{
+                                        color:
+                                          active
+                                            ? COLORS.royal
+                                            : COLORS.textSecondary,
+
+                                        fontWeight:
+                                          '900',
+
+                                        fontSize:
+                                          14,
+                                      }}
+                                    >
+                                      {
+                                        option.label
+                                      }
+                                    </Text>
+                                  </TouchableOpacity>
+                                );
+                              }
+                            )}
+                          </View>
+                        </View>
+                      )}
+
+
+                      {/* TOTAL */}
+
+                      <View
+                        style={{
+                          backgroundColor:
+                            COLORS.royal,
+
+                          borderRadius:
+                            RADIUS.large,
+
+                          padding:
+                            18,
+
+                          marginBottom:
+                            14,
+                        }}
+                      >
+                        <View
+                          style={{
+                            flexDirection:
+                              'row',
+
+                            alignItems:
+                              'center',
+
+                            justifyContent:
+                              'space-between',
+
+                            gap:
+                              12,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.white,
+
+                              fontSize:
+                                15,
+
+                              fontWeight:
+                                '800',
+                            }}
+                          >
+                            {
+                              paymentSummary.payment_status ===
+                              'paid'
+                                ? 'Paid'
+                                : 'Total'
+                            }
+                          </Text>
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.white,
+
+                              fontSize:
+                                27,
+
+                              fontWeight:
+                                '900',
+                            }}
+                          >
+                            ${
+                              paymentSummary.payment_status ===
+                              'paid'
+                                ? Number(
+                                    paymentSummary.paid_total ||
+                                    0
+                                  ).toFixed(2)
+                                : checkoutGrandTotal.toFixed(
+                                    2
+                                  )
+                            }
+                          </Text>
+                        </View>
+
+
+                        {checkoutTipTax >
+                          0 &&
+                          paymentSummary.payment_status !==
+                          'paid' && (
+                          <Text
+                            style={{
+                              color:
+                                'rgba(255,255,255,0.80)',
+
+                              fontSize:
+                                11,
+
+                              marginTop:
+                                7,
+                            }}
+                          >
+                            Includes ${checkoutTipTax.toFixed(
+                              2
+                            )} tip tax.
+                          </Text>
+                        )}
+                      </View>
+
+
+                      {paymentSummary.payment_status ===
+                      'paid' ? (
+                        <View
+                          style={{
+                            backgroundColor:
+                              COLORS.successSoft,
+
+                            borderRadius:
+                              RADIUS.large,
+
+                            padding:
+                              16,
+
+                            alignItems:
+                              'center',
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                COLORS.success,
+
+                              fontSize:
+                                15,
+
+                              fontWeight:
+                                '900',
+                            }}
+                          >
+                            ✓ This appointment is paid
+                          </Text>
+
+                          <Text
+                            style={{
+                              color:
+                                COLORS.textSecondary,
+
+                              fontSize:
+                                12,
+
+                              marginTop:
+                                5,
+
+                              textAlign:
+                                'center',
+                            }}
+                          >
+                            Payment history is safely stored in the database.
+                          </Text>
+                        </View>
+                      ) : (
+                        <Button
+                          title={
+                            paymentSubmitting
+                              ? 'Processing...'
+                              : paymentMethod ===
+                                'cash'
+                              ? `Record Cash • $${checkoutAmountDue.toFixed(
+                                  2
+                                )}`
+                              : `Continue to Card • $${checkoutAmountDue.toFixed(
+                                  2
+                                )}`
+                          }
+
+                          disabled={
+                            paymentSubmitting
+                          }
+
+                          onPress={
+                            completePayment
+                          }
+                        />
+                      )}
+                    </>
+                  )}
+                </ScrollView>
+              </Pressable>
+            </KeyboardAvoidingView>
+          </Pressable>
+        </Modal>
+
+
+        {/* =====================================================
+            EDIT APPOINTMENT MODAL
+        ===================================================== */}
+
+        <Modal
+          visible={
+            editOpen
+          }
+
+          transparent
+
+          animationType="fade"
+
+          onRequestClose={() =>
+            setEditOpen(
+              false
+            )
+          }
+        >
+          <Pressable
+            onPress={() =>
+              setEditOpen(
+                false
+              )
+            }
+
+            style={{
+              flex:
+                1,
+
+              backgroundColor:
+                'rgba(16,24,40,0.45)',
+
+              alignItems:
+                'center',
+
+              justifyContent:
+                'center',
+
+              padding:
+                15,
+            }}
+          >
+            <KeyboardAvoidingView
+              behavior={
+                Platform.OS ===
+                'ios'
+                  ? 'padding'
+                  : undefined
+              }
+
+              style={{
+                width:
+                  isPhone
+                    ? '100%'
+                    : 650,
+
+                maxHeight:
+                  '94%',
+              }}
+            >
+              <Pressable
+                onPress={() => {}}
+
+                style={{
+                  width:
+                    '100%',
+
+                  maxHeight:
+                    '100%',
+
+                  borderRadius:
+                    24,
+
+                  backgroundColor:
+                    COLORS.background,
+
+                  overflow:
+                    'hidden',
+
+                  ...SHADOWS.floating,
+                }}
+              >
+
+                {/* EDIT HEADER */}
+
+                <View
+                  style={{
+                    flexDirection:
+                      'row',
+
+                    alignItems:
+                      'center',
+
+                    justifyContent:
+                      'space-between',
+
+                    gap:
+                      10,
+
+                    padding:
+                      18,
+
+                    backgroundColor:
+                      COLORS.white,
+
+                    borderBottomWidth:
+                      1,
+
+                    borderBottomColor:
+                      COLORS.border,
+                  }}
+                >
+                  <Text
+                    style={{
+                      color:
+                        COLORS.royalDark,
+
+                      fontSize:
+                        20,
+
+                      fontWeight:
+                        '900',
+                    }}
+                  >
+                    Edit Appointment
+                  </Text>
+
+
+                  <TouchableOpacity
+                    onPress={() =>
+                      setEditOpen(
+                        false
+                      )
+                    }
+
+                    style={{
+                      width:
+                        38,
+
+                      height:
+                        38,
+
+                      borderRadius:
+                        19,
+
+                      backgroundColor:
+                        COLORS.surfaceSoft,
+
+                      alignItems:
+                        'center',
+
+                      justifyContent:
+                        'center',
+                    }}
+                  >
+                    <Text
+                      style={{
+                        fontSize:
+                          20,
+                      }}
+                    >
+                      ×
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+
+                <ScrollView
+                  keyboardShouldPersistTaps="handled"
+
+                  showsVerticalScrollIndicator={
+                    false
+                  }
+
+                  contentContainerStyle={{
+                    padding:
+                      20,
+
+                    paddingBottom:
+                      35,
+                  }}
+                >
+
+                  {/* DATE */}
+
+                  <Label>
+                    Date
+                  </Label>
+
+                  <Input
+                    value={
+                      editDate
+                    }
+
+                    onChangeText={
+                      setEditDate
+                    }
+
+                    placeholder="YYYY-MM-DD"
+
+                    style={{
+                      marginBottom:
+                        12,
+                    }}
+                  />
+
+
+                  {/* TIME */}
+
+                  <Label>
+                    Time
+                  </Label>
+
+                  <Input
+                    value={
+                      editTime
+                    }
+
+                    onChangeText={
+                      setEditTime
+                    }
+
+                    placeholder="HH:MM"
+
+                    style={{
+                      marginBottom:
+                        12,
+                    }}
+                  />
+
+
+                  {/* DURATION */}
+
+                  <View
+                    style={{
+                      flexDirection:
+                        'row',
+
+                      gap:
+                        10,
+                    }}
+                  >
+                    <View
+                      style={{
+                        flex:
+                          1,
+                      }}
+                    >
+                      <Label>
+                        Hours
+                      </Label>
+
+                      <Input
+                        value={
+                          editHours
+                        }
+
+                        onChangeText={
+                          setEditHours
+                        }
+
+                        keyboardType="number-pad"
+                      />
+                    </View>
+
+
+                    <View
+                      style={{
+                        flex:
+                          1,
+                      }}
+                    >
+                      <Label>
+                        Minutes
+                      </Label>
+
+                      <Input
+                        value={
+                          editMinutes
+                        }
+
+                        onChangeText={
+                          setEditMinutes
+                        }
+
+                        keyboardType="number-pad"
+                      />
                     </View>
                   </View>
 
-                  {/* Inline editor */}
-                  {editingId === item.id && (
-                    <View style={{ marginTop: 12, backgroundColor: '#0f1729', borderWidth: 1, borderColor: '#273043', borderRadius: 10, padding: 12 }}>
-                      <Text style={{ color: '#fff', fontWeight: '700', marginBottom: 6 }}>Edit Appointment</Text>
 
-                      <Text style={{ color: '#fff' }}>Date (YYYY-MM-DD)</Text>
-                      <TextInput
-                        value={editStartDate}
-                        onChangeText={setEditStartDate}
-                        placeholder="YYYY-MM-DD"
-                        placeholderTextColor="#7a7f88"
-                        style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 10, marginTop: 6 }}
-                      />
+                  {/* PRICE / TIP */}
 
-                      <Text style={{ color: '#fff', marginTop: 10 }}>Time (HH:MM)</Text>
-                      <TextInput
-                        value={editStartTime}
-                        onChangeText={setEditStartTime}
-                        placeholder="HH:MM"
-                        placeholderTextColor="#7a7f88"
-                        style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 10, marginTop: 6 }}
-                      />
+                  <View
+                    style={{
+                      flexDirection:
+                        'row',
 
-                      <Text style={{ color: '#fff', marginTop: 10 }}>Hours</Text>
-                      <TextInput
-                        value={editHours}
-                        onChangeText={setEditHours}
-                        keyboardType="number-pad"
-                        placeholder="0"
-                        placeholderTextColor="#7a7f88"
-                        style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 10, marginTop: 6 }}
-                      />
+                      gap:
+                        10,
 
-                      <Text style={{ color: '#fff', marginTop: 10 }}>Minutes</Text>
-                      <TextInput
-                        value={editMinutes}
-                        onChangeText={setEditMinutes}
-                        keyboardType="number-pad"
-                        placeholder="30"
-                        placeholderTextColor="#7a7f88"
-                        style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 10, marginTop: 6 }}
-                      />
+                      marginTop:
+                        12,
+                    }}
+                  >
+                    <View
+                      style={{
+                        flex:
+                          1,
+                      }}
+                    >
+                      <Label>
+                        Price
+                      </Label>
 
-                      <Text style={{ color: '#fff', marginTop: 10 }}>Service Name</Text>
-                      <TextInput
-                        value={editServiceName}
-                        onChangeText={setEditServiceName}
-                        placeholder="Service name"
-                        placeholderTextColor="#7a7f88"
-                        style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 10, marginTop: 6 }}
-                      />
+                      <Input
+                        value={
+                          editPrice
+                        }
 
-                      <Text style={{ color: '#fff', marginTop: 10 }}>Price ($)</Text>
-                      <TextInput
-                        value={editPrice}
-                        onChangeText={setEditPrice}
+                        onChangeText={
+                          setEditPrice
+                        }
+
                         keyboardType="decimal-pad"
-                        placeholder="0"
-                        placeholderTextColor="#7a7f88"
-                        style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 10, marginTop: 6 }}
                       />
+                    </View>
 
-                      <Text style={{ color: '#fff', marginTop: 10 }}>Tip ($)</Text>
-                      <TextInput
-                        value={editTip}
-                        onChangeText={setEditTip}
+
+                    <View
+                      style={{
+                        flex:
+                          1,
+                      }}
+                    >
+                      <Label>
+                        Tip
+                      </Label>
+
+                      <Input
+                        value={
+                          editTip
+                        }
+
+                        onChangeText={
+                          setEditTip
+                        }
+
                         keyboardType="decimal-pad"
-                        placeholder="0"
-                        placeholderTextColor="#7a7f88"
-                        style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 10, marginTop: 6 }}
+                      />
+                    </View>
+                  </View>
+
+
+                  {/* SERVICE */}
+
+                  <View
+                    style={{
+                      marginTop:
+                        12,
+                    }}
+                  >
+                    <Label>
+                      Service
+                    </Label>
+
+                    <Input
+                      value={
+                        editServiceName
+                      }
+
+                      onChangeText={
+                        setEditServiceName
+                      }
+                    />
+                  </View>
+
+
+                  {/* NOTES */}
+
+                  <View
+                    style={{
+                      marginTop:
+                        12,
+                    }}
+                  >
+                    <Label>
+                      Notes
+                    </Label>
+
+                    <Input
+                      value={
+                        editNotes
+                      }
+
+                      onChangeText={
+                        setEditNotes
+                      }
+
+                      multiline
+
+                      style={{
+                        minHeight:
+                          90,
+
+                        paddingTop:
+                          12,
+
+                        textAlignVertical:
+                          'top',
+                      }}
+                    />
+                  </View>
+
+
+                  {/* ADD PRODUCT */}
+
+                  {products.length > 0 && (
+                    <View
+                      style={{
+                        marginTop:
+                          20,
+
+                        backgroundColor:
+                          COLORS.blueVerySoft,
+
+                        borderRadius:
+                          RADIUS.large,
+
+                        padding:
+                          15,
+
+                        borderWidth:
+                          1,
+
+                        borderColor:
+                          COLORS.border,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            COLORS.royalDark,
+
+                          fontSize:
+                            16,
+
+                          fontWeight:
+                            '900',
+
+                          marginBottom:
+                            14,
+                        }}
+                      >
+                        Add Product
+                      </Text>
+
+
+                      <SelectButton
+                        label="Product"
+
+                        value={
+                          products.find(
+                            (
+                              product
+                            ) =>
+                              product.id ===
+                              addProdId
+                          )?.name ||
+                          ''
+                        }
+
+                        placeholder="Choose product"
+
+                        onPress={() =>
+                          setProductPickerOpen(
+                            true
+                          )
+                        }
                       />
 
-                      <Text style={{ color: '#fff', marginTop: 10 }}>Notes</Text>
-                      <TextInput
-                        value={editNotes}
-                        onChangeText={setEditNotes}
-                        placeholder="Notes"
-                        placeholderTextColor="#7a7f88"
-                        style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 10, marginTop: 6 }}
+{canPickStaff && (
+  <SelectButton
+    label="Sold By"
+
+    value={
+      staff.find(
+        (
+          person
+        ) =>
+          person.id ===
+          addSellerId
+      )?.name ||
+      ''
+    }
+
+    placeholder="Choose seller"
+
+    onPress={() =>
+      setSellerPickerOpen(
+        true
+      )
+    }
+  />
+)}
+
+
+                      <Label>
+                        Quantity
+                      </Label>
+
+                      <Input
+                        value={
+                          addQty
+                        }
+
+                        onChangeText={
+                          setAddQty
+                        }
+
+                        keyboardType="number-pad"
+
+                        style={{
+                          marginBottom:
+                            12,
+                        }}
                       />
 
-                      {/* Add Product to this ticket */}
-                      <View style={{ marginTop: 14, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#273043' }}>
-                        <Text style={{ color: '#fff', fontWeight: '600' }}>Add Product</Text>
-                        <View style={{ borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, marginTop: 6, backgroundColor: '#14141a', minHeight: Platform.OS === 'ios' ? 180 : undefined }}>
-                          <Picker
-                            selectedValue={addProdId}
-                            onValueChange={(val) => setAddProdId(val)}
-                            mode={Platform.OS === 'android' ? 'dropdown' : undefined}
-                            dropdownIconColor="#f2f3f5"
-                            style={{ color: '#f2f3f5', backgroundColor: '#14141a', height: Platform.OS === 'android' ? 48 : undefined }}
-                            itemStyle={{ color: '#f2f3f5' }}
+
+                      <Button
+                        title={
+                          addingProduct
+                            ? 'Adding...'
+                            : 'Add Product to Ticket'
+                        }
+
+                        secondary
+
+                        disabled={
+                          addingProduct ||
+                          productAdded
+                        }
+
+                        onPress={
+                          addProductToTicket
+                        }
+                      />
+
+
+                      {productAdded && (
+                        <View
+                          style={{
+                            backgroundColor:
+                              '#E8F7EE',
+
+                            borderWidth:
+                              1,
+
+                            borderColor:
+                              '#A7DFC0',
+
+                            borderRadius:
+                              RADIUS.medium,
+
+                            padding:
+                              11,
+
+                            marginTop:
+                              10,
+
+                            flexDirection:
+                              'row',
+
+                            alignItems:
+                              'center',
+
+                            justifyContent:
+                              'center',
+
+                            gap:
+                              7,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color:
+                                '#157347',
+
+                              fontSize:
+                                13,
+
+                              fontWeight:
+                                '900',
+                            }}
                           >
-                            {products.map(p => (
-                              <Picker.Item key={p.id} label={`${p.name} ($${Number(p.price || 0).toFixed(2)})`} value={p.id} />
-                            ))}
-                          </Picker>
+                            {
+                              productAddedMessage ||
+                              'Product added successfully.'
+                            }
+                          </Text>
                         </View>
-
-                        <Text style={{ color: '#fff', marginTop: 10 }}>Quantity</Text>
-                        <TextInput
-                          value={addQty}
-                          onChangeText={setAddQty}
-                          keyboardType="number-pad"
-                          placeholder="1"
-                          placeholderTextColor="#7a7f88"
-                          style={{ color: '#f2f3f5', backgroundColor: '#1b1b22', borderWidth: 1, borderColor: '#2a2a33', borderRadius: 8, padding: 10, marginTop: 6 }}
-                        />
-
-                        <View style={{ marginTop: 8, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
-                          <Button title="Add Product to Ticket" onPress={addProductToTicket} color={Platform.OS === 'ios' ? undefined : '#3b82f6'} />
-                        </View>
-                      </View>
-
-                      {/* Save / Cancel */}
-                      <View style={{ flexDirection: 'row', gap: 12, marginTop: 12 }}>
-                        <View style={{ flex: 1, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
-                          <Button title="Save" onPress={saveEdits} color={Platform.OS === 'ios' ? undefined : '#10b981'} />
-                        </View>
-                        <View style={{ flex: 1, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#2a2a33' }}>
-                          <Button title="Cancel" onPress={closeEditor} color={Platform.OS === 'ios' ? undefined : '#6b7280'} />
-                        </View>
-                      </View>
+                      )}
                     </View>
                   )}
-                </View>
-              );
-            }}
-            ListFooterComponent={
-              <View style={{ padding: 16 }}>
-                <Button title="Logout" onPress={onLogout} color={Platform.OS === 'ios' ? undefined : '#e11d48' } />
-              </View>
-            }
-            contentContainerStyle={{ paddingBottom: 32 }}
-            keyboardDismissMode="on-drag"
-            keyboardShouldPersistTaps="handled"
-          />
 
-          {/* RIGHT DRAWER & OVERLAY */}
-          {panelOpen && (
-            <>
-              <Pressable
-                onPress={closePanel}
-                style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.45)' }}
-              />
-              <Animated.View
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  bottom: 0,
-                  right: 0,
-                  width: panelWidth,
-                  transform: [{ translateX }],
-                  backgroundColor: '#0d0f16',
-                  borderLeftWidth: 1,
-                  borderLeftColor: '#1f2330',
-                  shadowColor: '#000',
-                  shadowOpacity: 0.35,
-                  shadowRadius: 12,
-                  elevation: 8,
-                }}
-              >
-                {SidebarContent}
-              </Animated.View>
-            </>
-          )}
-        </SafeAreaView>
-      </TouchableWithoutFeedback>
-    </KeyboardAvoidingView>
-  );
-}
+
+                  {/* EDIT BUTTONS */}
+
+                  <View
+                    style={{
+                      flexDirection:
+                        'row',
+
+                      gap:
+                        10,
+
+                      marginTop:
+                        20,
+                    }}
+                  >
+                    <Button
+                      title="Cancel"
+
+                      secondary
+
+                      style={{
+                        flex:
+                          1,
+                      }}
+
+                      onPress={() =>
+                        setEditOpen(
+                          false
+                        )
+                      }
+                    />
+
+
+                    <Button
+                      title="Save Changes"
+
+                      style={{
+                        flex:
+                          2,
+                      }}
+
+                      onPress={
+                        saveEdit
+                      }
+                    />
+                  </View>
+
+                </ScrollView>
+              </Pressable>
+            </KeyboardAvoidingView>
+          </Pressable>
+        </Modal>
+
+
+        {/* =====================================================
+            PICKERS
+        ===================================================== */}
+
+        <PickerModal
+          visible={
+            clientPickerOpen
+          }
+
+          title="Select Client"
+
+          items={
+            clientItems
+          }
+
+          selectedValue={
+            clientId
+          }
+
+          onSelect={
+            setClientId
+          }
+
+          onClose={() =>
+            setClientPickerOpen(
+              false
+            )
+          }
+        />
+
+
+        <PickerModal
+          visible={
+            specialtyPickerOpen
+          }
+
+          title="Select Specialty"
+
+          items={
+            specialtyItems
+          }
+
+          selectedValue={
+            specialtySlug
+          }
+
+          onSelect={
+            (
+              value
+            ) => {
+              setSpecialtySlug(
+                value
+              );
+
+              setStaffId(
+                canPickStaff
+                  ? null
+                  : me?.id
+              );
+
+              setServiceId(
+                null
+              );
+
+              setSelectedTime(
+                null
+              );
+            }
+          }
+
+          onClose={() =>
+            setSpecialtyPickerOpen(
+              false
+            )
+          }
+        />
+
+
+        <PickerModal
+          visible={
+            staffPickerOpen
+          }
+
+          title="Select Professional"
+
+          items={
+            staffItems
+          }
+
+          selectedValue={
+            staffId
+          }
+
+          onSelect={
+            (
+              value
+            ) => {
+              setStaffId(
+                value
+              );
+
+              setSelectedTime(
+                null
+              );
+            }
+          }
+
+          onClose={() =>
+            setStaffPickerOpen(
+              false
+            )
+          }
+
+          emptyText="No matching professionals found."
+        />
+
+
+        <PickerModal
+          visible={
+            servicePickerOpen
+          }
+
+          title="Select Service"
+
+          items={
+            serviceItems
+          }
+
+          selectedValue={
+            serviceId
+          }
+
+          onSelect={
+            (
+              value
+            ) => {
+              setServiceId(
+                value
+              );
+
+              setSelectedTime(
+                null
+              );
+            }
+          }
+
+          onClose={() =>
+            setServicePickerOpen(
+              false
+            )
+          }
+
+          emptyText="No services found for this specialty."
+        />
+
+<PickerModal
+  visible={
+    saleSellerPickerOpen
+  }
+
+  title="Change Product Seller"
+
+  items={
+    sellerItems
+  }
+
+  selectedValue={
+    saleSellerTarget
+      ?.staff_id ||
+    null
+  }
+
+  onSelect={
+    updateProductSeller
+  }
+
+  onClose={() => {
+    if (
+      !updatingSaleSeller
+    ) {
+      setSaleSellerPickerOpen(
+        false
+      );
+
+      setSaleSellerTarget(
+        null
+      );
+    }
+  }}
+
+  emptyText="No staff available."
+/>
+
+
+<PickerModal
+  visible={
+    sellerPickerOpen
+  }
+
+  title="Sold By"
+
+  items={
+    sellerItems
+  }
+
+  selectedValue={
+    addSellerId
+  }
+
+  onSelect={
+    setAddSellerId
+  }
+
+  onClose={() =>
+    setSellerPickerOpen(
+      false
+    )
+  }
+
+  emptyText="No staff available."
+/>
+
+        <PickerModal
+          visible={
+            productPickerOpen
+          }
+
+          title="Select Product"
+
+          items={
+            productItems
+          }
+
+          selectedValue={
+            addProdId
+          }
+
+          onSelect={
+            setAddProdId
+          }
+
+          onClose={() =>
+            setProductPickerOpen(
+              false
+            )
+          }
+
+          emptyText="No active products are currently in stock."
+        />
+      </View>
+    );
+  }
+
+
+  /* =========================================================
+     STYLES
+  ========================================================= */
+
+  const styles =
+    StyleSheet.create({
+      screen: {
+        flex:
+          1,
+
+        backgroundColor:
+          COLORS.background,
+      },
+
+      centered: {
+        flex:
+          1,
+
+        alignItems:
+        'center',
+
+        justifyContent:
+          'center',
+      },
+
+      card: {
+        backgroundColor:
+          COLORS.white,
+
+        borderWidth:
+          1,
+
+        borderColor:
+          COLORS.border,
+
+        borderRadius:
+          RADIUS.large,
+
+        ...SHADOWS.card,
+      },
+
+      title: {
+        color:
+          COLORS.royalDark,
+
+        fontSize:
+          22,
+
+        fontWeight:
+          '900',
+      },
+
+      subtitle: {
+        color:
+          COLORS.textMuted,
+
+        fontSize:
+          13,
+
+        marginTop:
+          4,
+      },
+
+      row: {
+        flexDirection:
+          'row',
+
+        alignItems:
+          'center',
+      },
+
+      divider: {
+        height:
+          1,
+
+        backgroundColor:
+          COLORS.border,
+      },
+    });
